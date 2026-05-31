@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PagedAttention - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="paged-attention">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>optimization</span><span>/</span>PagedAttention</nav>
+
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>optimization</span><span>intermediate</span><span class="status">ready</span><span>20 min</span></div>
+      <h1>PagedAttention</h1>
+      <p class="hero-text">分页式 KV 访问：让 Attention kernel 从不连续的显存块中读取 KV，告别显存碎片</p>
+      <div class="tags"><span class="tag">PagedAttention</span><span class="tag">Block Table</span><span class="tag">Slot Mapping</span><span class="tag">Attention Backend</span></div>
+    </section>
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      <p>想象你在图书馆查资料。传统做法是给每个读者<strong>预留一整排连续的书架</strong>，不管他读多少页都占着——这浪费空间，而且大书架很难找。PagedAttention 的做法是：<strong>把书架切成固定大小的小格子（block），按需分配</strong>。读者手里拿一张<strong>座位表（block table）</strong>，上面写着"我的第 0 段在格子 5，第 1 段在格子 12……"。查资料时，按座位表跳着读就行，不需要书架连续。</p>
+
+      <p>写笔记也一样：管理员给你一张<strong>投递单（slot mapping）</strong>，告诉你"你今天写的第 3 条笔记投递到格子 12 的第 3 个位置"。你不用管格子 12 在显存的哪个角落，照着投递单写就行。</p>
+
+      <div class="diagram-container">
+        <div class="diagram" data-ref="vllm/v1/attention/backend.py">
+          <div class="diagram-title">PagedAttention 核心概念</div>
+          <div class="pa-mental-model">
+            <div class="pa-requests">
+              <div class="pa-req">
+                <div class="pa-req-title">请求 A（3 个 block）</div>
+                <div class="pa-req-table">
+                  <span class="pa-req-label">Block Table:</span>
+                  <span class="pa-req-cell">B2</span>
+                  <span class="pa-req-cell">B5</span>
+                  <span class="pa-req-cell">B7</span>
+                </div>
+              </div>
+              <div class="pa-req">
+                <div class="pa-req-title">请求 B（4 个 block，前 2 个与 A 共享）</div>
+                <div class="pa-req-table">
+                  <span class="pa-req-label">Block Table:</span>
+                  <span class="pa-req-cell pa-shared">B2</span>
+                  <span class="pa-req-cell pa-shared">B5</span>
+                  <span class="pa-req-cell">B1</span>
+                  <span class="pa-req-cell">B3</span>
+                </div>
+              </div>
+            </div>
+            <div class="pa-arrow-down">▼ Attention kernel 按 Block Table 跳着读 ▼</div>
+            <div class="pa-gpu-mem">
+              <div class="pa-gpu-title">GPU 显存（物理 block 排列，不需要连续）</div>
+              <div class="pa-blocks">
+                <div class="pa-block" data-bid="0">B0</div>
+                <div class="pa-block pa-block-req-b" data-bid="1">B1</div>
+                <div class="pa-block pa-block-shared" data-bid="2">B2</div>
+                <div class="pa-block pa-block-req-b" data-bid="3">B3</div>
+                <div class="pa-block" data-bid="4">B4</div>
+                <div class="pa-block pa-block-shared" data-bid="5">B5</div>
+                <div class="pa-block" data-bid="6">B6</div>
+                <div class="pa-block pa-block-req-a" data-bid="7">B7</div>
+              </div>
+            </div>
+            <div class="pa-legend">
+              <div class="pa-legend-item"><span class="pa-legend-dot pa-block-shared"></span> A 和 B 共享（前缀复用）</div>
+              <div class="pa-legend-item"><span class="pa-legend-dot pa-block-req-a"></span> 仅 A 使用</div>
+              <div class="pa-legend-item"><span class="pa-legend-dot pa-block-req-b"></span> 仅 B 使用</div>
+              <div class="pa-legend-item"><span class="pa-legend-dot pa-block"></span> 空闲</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>关键收益：<strong>显存按需分配</strong>（不用预分配连续大块）、<strong>前缀共享</strong>（相同 prompt 的 block 只存一份）、<strong>零碎片</strong>（block 大小统一，释放后立即可用）。</p>
+
+      <p>注意：V1 代码中没有名为 PagedAttention 的类——它是一种<strong>整体设计模式</strong>，体现在 Block Table、Slot Mapping、Attention Metadata 等数据结构和 kernel 的协作中。</p>
+    </section>
+
+    <section class="panel">
+      <h2>交互演示：一次 Attention 的完整流程</h2>
+      <p>下面展示从调度器输出到 Attention kernel 执行的完整数据流。重点关注三个核心数据结构：<strong>Block Table</strong>（读 KV 时用）、<strong>Slot Mapping</strong>（写 KV 时用）、<strong>Attention Metadata</strong>（告诉 kernel 每个请求的边界信息）。</p>
+
+      <div class="diagram-container">
+        <div class="diagram" data-ref="vllm/v1/worker/gpu_model_runner.py">
+          <div class="diagram-title">PagedAttention 端到端流程</div>
+          <div class="pa-e2e-flow">
+            <div class="pa-e2e-step">
+              <div class="pa-e2e-step-num">1</div>
+              <div class="pa-e2e-step-content">
+                <div class="pa-e2e-step-title">调度器分配 Block</div>
+                <div class="pa-e2e-step-body">Scheduler → KV Cache Manager 分配物理 block ID，写入每个请求的 Block Table</div>
+              </div>
+            </div>
+            <div class="pa-e2e-arrow">▼</div>
+            <div class="pa-e2e-step">
+              <div class="pa-e2e-step-num">2</div>
+              <div class="pa-e2e-step-content">
+                <div class="pa-e2e-step-title">Model Runner 准备输入</div>
+                <div class="pa-e2e-step-body">
+                  <code>_prepare_inputs()</code> 计算：
+                  <div class="pa-e2e-detail">
+                    <div><strong>query_start_loc</strong>：每个请求的 query token 在扁平 token 数组中的起始位置（scheduled tokens 的前缀和，如 [3,2] → [0,3,5]）</div>
+                    <div><strong>seq_lens</strong>：每个请求的 KV 总长度（已计算 + 本步新 token）</div>
+                    <div><strong>positions</strong>：每个 token 的绝对位置</div>
+                    <div><strong>slot_mapping</strong>：每个 token → KV cache 扁平索引（仅用于写 KV）</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="pa-e2e-arrow">▼</div>
+            <div class="pa-e2e-step">
+              <div class="pa-e2e-step-num">3</div>
+              <div class="pa-e2e-step-content">
+                <div class="pa-e2e-step-title">构建 Attention Metadata</div>
+                <div class="pa-e2e-step-body">
+                  <code>_build_attention_metadata()</code> 把上面的数据打包成 <code>CommonAttentionMetadata</code>，再由各 backend 的 Builder 转换成 backend 专属的 metadata
+                </div>
+              </div>
+            </div>
+            <div class="pa-e2e-arrow">▼</div>
+            <div class="pa-e2e-step">
+              <div class="pa-e2e-step-num">4</div>
+              <div class="pa-e2e-step-content">
+                <div class="pa-e2e-step-title">KV Cache 写入 — 写路径（scatter）</div>
+                <div class="pa-e2e-step-body">
+                  <code>do_kv_cache_update()</code>：用 <strong>slot_mapping</strong> 把新算出的 K/V 向量散列写入 KV cache 的对应位置
+                </div>
+              </div>
+            </div>
+            <div class="pa-e2e-arrow">▼</div>
+            <div class="pa-e2e-step">
+              <div class="pa-e2e-step-num">5</div>
+              <div class="pa-e2e-step-content">
+                <div class="pa-e2e-step-title">Attention 计算 — 读路径（paged read）</div>
+                <div class="pa-e2e-step-body">
+                  Attention kernel 用 <strong>block_table</strong> + <strong>query_start_loc</strong> + <strong>seq_lens</strong> 从不连续的 block 中读取 KV，计算注意力
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Slot Mapping：写 KV 的投递单</h2>
+      <p>下面我们按流程顺序，先看写路径的 Slot Mapping，再看读路径的 Block Table。</p>
+      <p>Slot Mapping 是一个 1D 张量，长度等于本步要处理的 token 总数。每个元素是一个<strong>扁平索引</strong>，指向 KV cache 张量中的某个位置。新算出的 K/V 向量就按这个索引散列写入。</p>
+
+      <h3>计算公式</h3>
+      <p>对每个 token，已知它的 <code>position</code>（在序列中的绝对位置）和所属请求的 <code>block_table</code>。回顾一下，<code>block_size</code> 是每个 block 存放的 token 数（默认 16，见下方关键配置）：</p>
+
+      <div class="code-block" data-ref="vllm/v1/worker/block_table.py">
+        <pre><code># 伪代码：Triton kernel 为每个 token 计算 slot_mapping
+# cp_size = Context Parallelism 的 world size（默认 1）
+virtual_block_size = block_size * cp_size
+block_index  = position // virtual_block_size     # 逻辑 block 编号
+block_offset = position %  virtual_block_size     # 虚拟 block 内偏移
+block_number = block_table[req_idx, block_index]  # 物理 block ID
+# cp_size=1 时退化为 block_offset；cp_size>1 时按 interleave 规则重映射
+slot_id = block_number * block_size + local_offset</code></pre>
+      </div>
+
+      <h3>具体例子</h3>
+      <p>假设 block_size=16，cp_size=1（无 Context Parallelism），请求 A 的 Block Table = [B2, B5, B7]，本步要处理 A 的第 18 个 token（position=17）：</p>
+
+      <div class="diagram-container">
+        <div class="diagram">
+          <div class="diagram-title">Slot Mapping 计算示例</div>
+          <div class="pa-slot-example">
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">position</span>
+              <span class="pa-slot-value">17</span>
+            </div>
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">virtual_block_size</span>
+              <span class="pa-slot-value">16 × 1 = <strong>16</strong>（cp_size=1）</span>
+            </div>
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">block_index</span>
+              <span class="pa-slot-value">17 // 16 = <strong>1</strong></span>
+            </div>
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">block_offset</span>
+              <span class="pa-slot-value">17 % 16 = <strong>1</strong></span>
+            </div>
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">block_number</span>
+              <span class="pa-slot-value">block_table[0, 1] = <strong>B5</strong></span>
+            </div>
+            <div class="pa-slot-step">
+              <span class="pa-slot-label">slot_id</span>
+              <span class="pa-slot-value">5 × 16 + 1 = <strong>81</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>这个 token 的 K/V 向量会被写入 KV cache 的第 81 个位置。如果某个 token 不属于当前 rank（Context Parallelism 场景），slot_id 会被设为 <code>PAD_SLOT_ID = -1</code>，表示跳过。</p>
+
+      <h3>Slot Mapping 只用于写，不用于读</h3>
+      <p>这是一个容易混淆的点。Slot Mapping 只在 <code>do_kv_cache_update()</code> 中使用——把新算出的 K/V 散列写入 KV cache。Attention 计算本身<strong>不用 slot_mapping</strong>，而是用 <code>block_table</code> + <code>seq_lens</code> 来读取 KV。写和读走的是两条不同的路径。</p>
+    </section>
+
+    <section class="panel">
+      <h2>Block Table：读 KV 的座位表</h2>
+      <p>Block Table 是一个 2D 张量，形状 <code>(num_reqs, max_num_blocks_per_req)</code>。第 <code>[req_idx, block_idx]</code> 个元素是该请求第 <code>block_idx</code> 个逻辑 block 对应的<strong>物理 block ID</strong>。</p>
+
+      <div class="diagram-container">
+        <div class="diagram" data-ref="vllm/v1/worker/block_table.py">
+          <div class="diagram-title">Block Table 结构</div>
+          <div class="pa-block-table-diagram">
+            <div class="pa-bt-row pa-bt-header">
+              <div class="pa-bt-cell"></div>
+              <div class="pa-bt-cell">逻辑 block 0</div>
+              <div class="pa-bt-cell">逻辑 block 1</div>
+              <div class="pa-bt-cell">逻辑 block 2</div>
+              <div class="pa-bt-cell">逻辑 block 3</div>
+              <div class="pa-bt-cell">...</div>
+            </div>
+            <div class="pa-bt-row">
+              <div class="pa-bt-cell pa-bt-req">请求 A</div>
+              <div class="pa-bt-cell pa-bt-shared">B2</div>
+              <div class="pa-bt-cell pa-bt-shared">B5</div>
+              <div class="pa-bt-cell pa-bt-req-a">B7</div>
+              <div class="pa-bt-cell pa-bt-pad">—</div>
+              <div class="pa-bt-cell pa-bt-pad">...</div>
+            </div>
+            <div class="pa-bt-row">
+              <div class="pa-bt-cell pa-bt-req">请求 B</div>
+              <div class="pa-bt-cell pa-bt-shared">B2</div>
+              <div class="pa-bt-cell pa-bt-shared">B5</div>
+              <div class="pa-bt-cell pa-bt-req-b">B1</div>
+              <div class="pa-bt-cell pa-bt-req-b">B3</div>
+              <div class="pa-bt-cell pa-bt-pad">...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>Attention kernel 在计算时，对每个请求，按 block_table 找到它的物理 block，然后从 KV cache 张量中读取对应的 K/V 向量。因为 block_table 的存在，物理 block 不需要连续——kernel 会自动跳着读。</p>
+
+      <h3>Block Table 的 GPU 传输</h3>
+      <p>Block Table 在 CPU 上维护（调度器分配 block 时更新），每步通过 <code>commit_block_table()</code> 异步拷贝到 GPU。GPU 版本的 Block Table 还会用 Triton kernel 做一次重排（从请求状态布局转为 batch 布局），确保 kernel 访问时 cache 友好。</p>
+    </section>
+
+    <section class="panel">
+      <h2>Attention Metadata：告诉 Kernel 每个请求的边界</h2>
+      <p>Attention kernel 需要知道"哪些 token 属于哪个请求""每个请求的 KV 有多长"等信息。这些信息统称为 <strong>Attention Metadata</strong>。vLLM 把它分成两层：<strong>通用层</strong>（所有 backend 共享）和 <strong>backend 专属层</strong>（每个 backend 自己扩展）。</p>
+
+      <h3>通用层：CommonAttentionMetadata</h3>
+      <p>这是所有 backend 共享的基础数据。<code>_prepare_inputs()</code> 计算 query_start_loc、seq_lens 等原始张量，<code>_build_attention_metadata()</code> 将它们打包成 <code>CommonAttentionMetadata</code>：</p>
+
+      <div class="config-table">
+        <div class="config-row config-header">
+          <div class="config-cell">字段</div>
+          <div class="config-cell">形状</div>
+          <div class="config-cell">含义</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>query_start_loc</code></div>
+          <div class="config-cell">(num_reqs+1,)</div>
+          <div class="config-cell">每个请求的 query token 在扁平 token 数组中的起始位置（scheduled tokens 的前缀和）。例如 [0, 3, 5] 表示请求 0 的 query 占 token 0-2，请求 1 的 query 占 token 3-4</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>seq_lens</code></div>
+          <div class="config-cell">(num_reqs,)</div>
+          <div class="config-cell">每个请求的 KV 总长度（已计算的 token 数 + 本步新 token 数）。注意：async spec decode 模式下可能是乐观估计（假设所有 draft token 都被接受）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>block_table_tensor</code></div>
+          <div class="config-cell">(num_reqs, max_blocks)</div>
+          <div class="config-cell">每个请求的物理 block 映射表</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>slot_mapping</code></div>
+          <div class="config-cell">(num_tokens,)</div>
+          <div class="config-cell">每个 token → KV cache 扁平索引（仅用于写 KV）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>num_reqs</code></div>
+          <div class="config-cell">int</div>
+          <div class="config-cell">本步的请求数（可能包含 padding）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>num_actual_tokens</code></div>
+          <div class="config-cell">int</div>
+          <div class="config-cell">本步的 token 总数（可能包含 padding）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>max_query_len</code></div>
+          <div class="config-cell">int</div>
+          <div class="config-cell">本步最长的 query 长度（kernel 需要知道最大长度来分配资源）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>max_seq_len</code></div>
+          <div class="config-cell">int</div>
+          <div class="config-cell">本步最长的 KV 序列长度</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>is_prefilling</code></div>
+          <div class="config-cell">(num_reqs,) bool</div>
+          <div class="config-cell">每个请求是否还在 prefill 阶段</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>positions</code></div>
+          <div class="config-cell">(num_tokens,)</div>
+          <div class="config-cell">每个 token 的绝对位置（用于位置编码）</div>
+        </div>
+      </div>
+
+      <h3>Backend 专属层</h3>
+      <p>每个 Attention Backend 有自己的 Builder，把 <code>CommonAttentionMetadata</code> 转换成 backend 专属的 metadata 对象。不同 backend 需要的额外信息不同：</p>
+
+      <div class="config-table">
+        <div class="config-row config-header">
+          <div class="config-cell">Backend</div>
+          <div class="config-cell">专属 Metadata</div>
+          <div class="config-cell">额外内容</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><strong>FlashAttention</strong></div>
+          <div class="config-cell"><code>FlashAttentionMetadata</code></div>
+          <div class="config-cell">scheduler_metadata（FA3 AOT 调度）、cascade 相关字段（prefix/suffix kv_lens）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><strong>FlashInfer</strong></div>
+          <div class="config-cell"><code>FlashInferMetadata</code></div>
+          <div class="config-cell">prefill/decode 分离计数、FI Wrapper 对象（BatchPrefillWithPagedKVCacheWrapper / BatchDecodeWithPagedKVCacheWrapper）或 TRT-LLM 参数</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><strong>Triton</strong></div>
+          <div class="config-cell"><code>TritonAttentionMetadata</code></div>
+          <div class="config-cell">softmax 分段缓冲区（softmax_segm_output/max/expsum）、seq_threshold_3D</div>
+        </div>
+      </div>
+
+      <h3>构建流程</h3>
+      <div class="diagram-container">
+        <div class="diagram" data-ref="vllm/v1/attention/backend.py">
+          <div class="diagram-title">Attention Metadata 构建管线</div>
+          <div class="pa-metadata-pipeline">
+            <div class="pa-mp-step">
+              <div class="pa-mp-box pa-mp-input">_prepare_inputs()</div>
+              <div class="pa-mp-desc">计算 query_start_loc、seq_lens、positions、slot_mapping</div>
+            </div>
+            <div class="pa-mp-arrow">→</div>
+            <div class="pa-mp-step">
+              <div class="pa-mp-box pa-mp-input">_build_attention_metadata()</div>
+              <div class="pa-mp-desc">打包成 CommonAttentionMetadata</div>
+            </div>
+            <div class="pa-mp-arrow">→</div>
+            <div class="pa-mp-step">
+              <div class="pa-mp-box pa-mp-builder">Builder.build()</div>
+              <div class="pa-mp-desc">每个 AttentionGroup 的 Builder 转换成 backend 专属 metadata</div>
+            </div>
+            <div class="pa-mp-arrow">→</div>
+            <div class="pa-mp-step">
+              <div class="pa-mp-box pa-mp-output">Per-Layer Metadata Dict</div>
+              <div class="pa-mp-desc">{layer_name: metadata}，注入 forward context</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>同一个 AttentionGroup 内的所有层共享同一个 metadata 对象。混合模型（如 sliding window + full attention）可能有多个 KV Cache Group，每个组有不同的 block_table 和 slot_mapping，但共享其他字段。</p>
+    </section>
+
+    <section class="panel">
+      <h2>混合模型与 KV Cache Group</h2>
+      <p>有些模型（如 Mixtral、DeepSeek）同时有<strong>滑动窗口 attention</strong>和<strong>全量 attention</strong>层。它们的 KV cache 需求不同：滑动窗口层只保留最近 N 个 token 的 KV，全量层保留全部。vLLM 用 <strong>KV Cache Group</strong> 来处理这种情况。</p>
+
+      <p>每个 KV Cache Group 有自己的 block_table 和 slot_mapping。同一个 Group 内的层共享这些数据，不同 Group 之间独立。Model Runner 在构建 metadata 时，会为每个 Group 创建一份 <code>CommonAttentionMetadata</code> 的浅拷贝，只替换 block_table 和 slot_mapping，其他字段共享。</p>
+
+      <p>这确保了滑动窗口层和全量层可以各自管理自己的 block 分配和回收，互不干扰。</p>
+    </section>
+
+    <section class="panel">
+      <h2>KV Cache 写入：Scatter 操作</h2>
+      <p>模型前向传播时，每一层先算出新的 K/V 向量，然后写入 KV cache。这个写入操作叫 <strong>scatter</strong>（散列写入，就像按投递单分拣包裹）——把数据散列到不连续的位置。</p>
+
+      <h3>写入时机</h3>
+      <p>目前所有主流 backend（FlashAttention、FlashInfer、Triton）都采用<strong>分开写入</strong>的方式：<code>forward_includes_kv_cache_update = False</code>。即先调用 <code>do_kv_cache_update()</code> 把 K/V 散列写入 KV cache，再调用 <code>forward()</code> 计算 Attention。写和算在两个独立的步骤中完成。</p>
+
+      <h3>写入过程</h3>
+      <div class="code-block" data-ref="vllm/v1/attention/backends/flash_attn.py">
+        <pre><code># FlashAttention 的 do_kv_cache_update()
+key_cache, value_cache = kv_cache.unbind(dim=1)  # 拆出 K 和 V
+reshape_and_cache_flash(
+    key, value,           # 新算出的 K/V 向量 [num_tokens, num_kv_heads, head_size]
+    key_cache, value_cache,  # KV cache 张量
+    slot_mapping,         # 投递单 [num_tokens]
+    kv_cache_dtype,       # 量化类型
+    k_scale, v_scale,     # 量化缩放因子
+)</code></pre>
+      </div>
+
+      <p><code>reshape_and_cache_flash</code> 是一个 CUDA kernel，对每个 token，按 <code>slot_mapping[token_idx]</code> 找到目标位置，把 K/V 向量写进去。如果 KV cache 使用 FP8 量化，写入时还会做量化转换。</p>
+
+      <div class="diagram-container">
+        <div class="diagram">
+          <div class="diagram-title">Scatter 写入示意</div>
+          <div class="pa-scatter-diagram">
+            <div class="pa-scatter-inputs">
+              <div class="pa-scatter-col">
+                <div class="pa-scatter-title">新 K/V 向量</div>
+                <div class="pa-scatter-item">token 0: K/V</div>
+                <div class="pa-scatter-item">token 1: K/V</div>
+                <div class="pa-scatter-item">token 2: K/V</div>
+                <div class="pa-scatter-item">token 3: K/V</div>
+              </div>
+              <div class="pa-scatter-col">
+                <div class="pa-scatter-title">slot_mapping</div>
+                <div class="pa-scatter-item">→ 81</div>
+                <div class="pa-scatter-item">→ 82</div>
+                <div class="pa-scatter-item">→ 33</div>
+                <div class="pa-scatter-item">→ 96</div>
+              </div>
+            </div>
+            <div class="pa-scatter-arrow">▼ scatter write</div>
+            <div class="pa-scatter-cache">
+              <div class="pa-scatter-title">KV Cache（扁平视图）</div>
+              <div class="pa-scatter-slots">
+                <div class="pa-scatter-slot">...</div>
+                <div class="pa-scatter-slot pa-scatter-written" data-slot="33">slot 33 ← token 2</div>
+                <div class="pa-scatter-slot">...</div>
+                <div class="pa-scatter-slot pa-scatter-written" data-slot="81">slot 81 ← token 0</div>
+                <div class="pa-scatter-slot pa-scatter-written" data-slot="82">slot 82 ← token 1</div>
+                <div class="pa-scatter-slot">...</div>
+                <div class="pa-scatter-slot pa-scatter-written" data-slot="96">slot 96 ← token 3</div>
+                <div class="pa-scatter-slot">...</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>KV Cache 读取：Paged Attention 计算</h2>
+      <p>KV 写入完成后，接下来就是 Attention 计算——从 KV cache 中读取历史 K/V，和新 token 的 Q 做注意力计算。这是 PagedAttention 的核心：kernel 通过 <strong>block_table</strong> 从不连续的物理 block 中读取 KV。</p>
+
+      <h3>FlashAttention 的读取方式</h3>
+      <p>FlashAttention 后端调用 <code>flash_attn_varlen_func</code>，传入以下关键参数：</p>
+
+      <div class="code-block" data-ref="vllm/v1/attention/backends/flash_attn.py">
+        <pre><code># FlashAttentionImpl.forward() 核心调用
+key_cache, value_cache = kv_cache.unbind(dim=1)  # 拆出 K 和 V
+flash_attn_varlen_func(
+    q=query[:num_actual_tokens],       # [num_tokens, num_heads, head_size]
+    k=key_cache,                        # [num_blocks, block_size, num_kv_heads, head_size]
+    v=value_cache,                      # 同上
+    cu_seqlens_q=query_start_loc,       # 每个请求的 query 起始位置
+    max_seqlen_q=max_query_len,         # 最长 query
+    seqused_k=seq_lens,                 # 每个请求的 KV 总长度
+    max_seqlen_k=max_seq_len,           # 最长 KV 序列
+    block_table=block_table,            # 物理 block 映射表
+    scheduler_metadata=...,             # FA3 AOT 调度信息
+)</code></pre>
+      </div>
+
+      <p>kernel 内部的工作方式：对每个请求，用 <code>block_table[req_idx]</code> 找到它的物理 block 列表，然后按 <code>seq_lens[req_idx]</code> 确定要读多少个 token，从那些 block 中连续读取 K/V 向量。虽然物理 block 不连续，但 kernel 会把连续的 block 预取到高速缓存中，减少显存访问延迟。</p>
+
+      <h3>FlashInfer 的读取方式</h3>
+      <p>FlashInfer 的做法不同——它把 batch <strong>拆成 prefill 和 decode 两部分</strong>，分别用不同的 wrapper（为什么拆分？见下方「三大 Backend 对比 → 什么是 Prefill/Decode 拆分？」）：</p>
+
+      <div class="config-table">
+        <div class="config-row config-header">
+          <div class="config-cell">阶段</div>
+          <div class="config-cell">Wrapper</div>
+          <div class="config-cell">特点</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">Prefill</div>
+          <div class="config-cell"><code>BatchPrefillWithPagedKVCacheWrapper</code></div>
+          <div class="config-cell">处理多个长 query，用 paged_kv_indptr + paged_kv_indices 描述 block 位置</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">Decode</div>
+          <div class="config-cell"><code>BatchDecodeWithPagedKVCacheWrapper</code></div>
+          <div class="config-cell">处理大量单 token decode，高度优化 batch 效率</div>
+        </div>
+      </div>
+
+      <p>FlashInfer 还支持 TRT-LLM 路径作为替代，直接传 block_tables + seq_lens 给 TRT-LLM kernel，不需要 FI Wrapper 的 plan 步骤。</p>
+
+      <h3>Triton 的读取方式</h3>
+      <p>Triton 后端调用自研的 <code>unified_attention()</code> kernel，参数和 FlashAttention 类似（cu_seqlens_q、seqused_k、block_table），但额外传入 softmax 分段缓冲区，用于手动管理 softmax 的中间结果。Triton kernel 目前不支持 cascade attention。</p>
+    </section>
+
+    <section class="panel">
+      <h2>Attention Backend 选择机制</h2>
+      <p>vLLM 内置了多种 Attention Backend，每种针对不同的硬件和场景优化。你不需要手动选择——vLLM 会根据你的硬件、模型配置自动选最合适的。</p>
+
+      <h3>选择流程</h3>
+      <div class="diagram-container">
+        <div class="diagram" data-ref="vllm/v1/attention/selector.py">
+          <div class="diagram-title">Backend 自动选择流程</div>
+          <div class="pa-backend-select">
+            <div class="pa-bs-step">
+              <div class="pa-bs-num">1</div>
+              <div class="pa-bs-content">
+                <strong>模型初始化</strong>时，<code>Attention.__init__()</code> 调用 <code>get_attn_backend()</code>，传入 head_size、dtype、kv_cache_dtype 等参数
+              </div>
+            </div>
+            <div class="pa-bs-arrow">▼</div>
+            <div class="pa-bs-step">
+              <div class="pa-bs-num">2</div>
+              <div class="pa-bs-content">
+                <code>get_attn_backend()</code> 组装 <code>AttentionSelectorConfig</code>，委托给当前平台的 <code>get_attn_backend_cls()</code>
+              </div>
+            </div>
+            <div class="pa-bs-arrow">▼</div>
+            <div class="pa-bs-step">
+              <div class="pa-bs-num">3</div>
+              <div class="pa-bs-content">
+                平台（如 CudaPlatform）获取<strong>优先级列表</strong>，按顺序逐个验证
+              </div>
+            </div>
+            <div class="pa-bs-arrow">▼</div>
+            <div class="pa-bs-step">
+              <div class="pa-bs-num">4</div>
+              <div class="pa-bs-content">
+                <code>validate_configuration()</code> 检查：head_size、dtype、block_size、MLA、sink、sparse、compute capability 等。第一个通过所有检查的 backend 胜出
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h3>CUDA 平台的优先级</h3>
+      <p>不同 GPU 架构和模型类型有不同的优先级顺序：</p>
+
+      <div class="config-table">
+        <div class="config-row config-header">
+          <div class="config-cell">场景</div>
+          <div class="config-cell">优先级（从高到低）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">SM90+ (Hopper) 非 MLA</div>
+          <div class="config-cell">FlashAttention → FlashInfer → Triton → FlexAttention → TurboQuant</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">SM100+ (Blackwell) 非 MLA</div>
+          <div class="config-cell">FlashInfer → FlashAttention → Triton → FlexAttention → TurboQuant</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">SM90+ MLA</div>
+          <div class="config-cell">FlashAttnMLA → FlashMLA → FlashInferMLA → TritonMLA → FlashMLASparse</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">SM100+ MLA</div>
+          <div class="config-cell">FlashInferMLA → TokenSpeedMLA → CutlassMLA → FlashAttnMLA → FlashMLA → TritonMLA → Sparse backends</div>
+        </div>
+      </div>
+
+      <p>你也可以用 <code>--attention-backend</code> 参数手动指定 backend，vLLM 会验证它能否在你的配置下运行。</p>
+
+      <h3>验证检查项</h3>
+      <p>每个 backend 的 <code>validate_configuration()</code> 会检查以下条件：</p>
+      <ul>
+        <li><strong>head_size</strong>：是否支持这个 head 维度（如 FlashAttention 支持所有 8 的倍数，≤256；FA4 可达 512）</li>
+        <li><strong>dtype</strong>：是否支持 fp16/bf16/fp32</li>
+        <li><strong>kv_cache_dtype</strong>：是否支持 FP8 量化 KV cache</li>
+        <li><strong>block_size</strong>：block 大小是否兼容（有些 backend 要求 block_size 是某数的倍数）</li>
+        <li><strong>MLA</strong>：是否支持 Multi-head Latent Attention（DeepSeek 系列模型需要）</li>
+        <li><strong>sink</strong>：是否支持 Attention Sink（StreamingLLM 等场景）</li>
+        <li><strong>sparse</strong>：是否支持稀疏 attention</li>
+        <li><strong>compute capability</strong>：GPU 架构是否满足最低要求</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>三大 Backend 对比</h2>
+      <p>目前 CUDA 平台上最常用的三个 backend 是 FlashAttention、FlashInfer 和 Triton。它们的核心差异如下：</p>
+
+      <div class="config-table">
+        <div class="config-row config-header">
+          <div class="config-cell">特性</div>
+          <div class="config-cell">FlashAttention</div>
+          <div class="config-cell">FlashInfer</div>
+          <div class="config-cell">Triton</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">KV cache 形状</div>
+          <div class="config-cell">(N, 2, B, H, D) <span style="font-size:10px;color:var(--muted)">N=num_blocks, B=block_size, H=num_kv_heads, D=head_size</span></div>
+          <div class="config-cell">(N, 2, B, H, D)</div>
+          <div class="config-cell">(N, 2, B, H, D)</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">Prefill/Decode 处理</div>
+          <div class="config-cell">统一 kernel（varlen）</div>
+          <div class="config-cell">拆分 prefill + decode，分别优化</div>
+          <div class="config-cell">统一 kernel</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">KV 写入方式</div>
+          <div class="config-cell">单独 scatter（reshape_and_cache_flash）</div>
+          <div class="config-cell">单独 scatter（同左）</div>
+          <div class="config-cell">单独 scatter（triton_reshape_and_cache_flash）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">FP8 KV cache</div>
+          <div class="config-cell">支持</div>
+          <div class="config-cell">支持（含 per-token-head 量化）</div>
+          <div class="config-cell">支持（含 per-token-head 量化）</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">Cascade Attention</div>
+          <div class="config-cell">支持</div>
+          <div class="config-cell">支持</div>
+          <div class="config-cell">暂不支持</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">AOT 调度</div>
+          <div class="config-cell">FA3 支持（scheduler_metadata）</div>
+          <div class="config-cell">FI Wrapper plan()</div>
+          <div class="config-cell">softmax 分段预分配</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">MLA 支持</div>
+          <div class="config-cell">独立 MLA backend</div>
+          <div class="config-cell">独立 MLA backend</div>
+          <div class="config-cell">独立 MLA backend</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell">CUDA Graph</div>
+          <div class="config-cell">ALWAYS（FA3）/ UNIFORM_BATCH（FA2）</div>
+          <div class="config-cell">UNIFORM_BATCH（TRT-LLM 可用时）/ UNIFORM_SINGLE_TOKEN_DECODE</div>
+          <div class="config-cell">ALWAYS</div>
+        </div>
+      </div>
+
+      <h3>什么是 Prefill/Decode 拆分？</h3>
+      <p>Prefill 阶段一次处理整个 prompt（可能几百上千 token），Decode 阶段每次只处理 1 个 token。两者的计算模式差异很大：</p>
+      <ul>
+        <li><strong>Prefill</strong>：Q 很长，K/V 也在增长。计算密集型（大量矩阵乘），瓶颈在算力</li>
+        <li><strong>Decode</strong>：Q 只有 1 个 token，K/V 很长。访存密集型（要读大量历史 KV），瓶颈在显存带宽</li>
+      </ul>
+      <p>FlashInfer 把两者拆开，用不同的 kernel 分别优化——prefill kernel 侧重计算效率，decode kernel 侧重访存效率。FlashAttention 和 Triton 则用统一的 varlen kernel 处理两种场景，通过 <code>cu_seqlens_q</code> 和 <code>seqused_k</code> 区分每个请求的 query 和 KV 长度。</p>
+    </section>
+
+    <section class="panel">
+      <h2>Attention Layer 的前向传播</h2>
+      <p>最后，让我们把所有内容串起来，看一个 Attention Layer 的 <code>forward()</code> 到底做了什么：</p>
+
+      <div class="code-block" data-ref="vllm/model_executor/layers/attention/attention.py">
+        <pre><code># Attention.forward() 核心流程（简化版）
+def forward(self, query, key, value):
+    # 1. 可选：量化 query
+    query = self.query_quant(query, self._q_scale)
+
+    # 2. Reshape Q/K/V 为 3D
+    query = query.view(-1, num_heads, head_size)
+    key   = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+
+    # 3. 写 KV cache（scatter）
+    #    从 forward_context 取出 slot_mapping
+    if not self.attn_backend.forward_includes_kv_cache_update:
+        kv_cache_dummy_dep = unified_kv_cache_update(key, value, self.layer_name)
+        # 内部调用 impl.do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+
+    # 4. 计算 Attention（paged read）
+    #    从 forward_context 取出 attn_metadata 和 kv_cache
+    unified_attention_with_output(query, key, value, output, self.layer_name)
+    # 内部调用 impl.forward(layer, query, key, value, kv_cache, attn_metadata, output)
+
+    return output</code></pre>
+      </div>
+
+      <p>注意步骤 3 和 4 之间的依赖关系：<code>kv_cache_dummy_dep</code> 是一个空张量，但 torch.compile 会通过它确保"先写 KV，再算 Attention"的顺序不被重排。</p>
+
+      <h3>forward_context 是什么？</h3>
+      <p><code>forward_context</code> 是一个线程局部变量（每个线程各自持有一份，互不干扰），在模型前向传播开始前由 Model Runner 设置。它存储了当前步的所有上下文信息：</p>
+      <ul>
+        <li><strong>attn_metadata</strong>：每层的 Attention Metadata（dict: layer_name → metadata）</li>
+        <li><strong>kv_cache</strong>：绑定到每个 Attention 层的 KV cache 张量</li>
+        <li><strong>slot_mapping</strong>：每层的 slot mapping（dict: layer_name → slot_mapping）</li>
+      </ul>
+      <p>这样，<code>unified_kv_cache_update</code> 和 <code>unified_attention_with_output</code> 这两个 custom op 只需要 <code>layer_name</code> 就能从 context 中取出所有需要的数据，而不需要显式传参——这对 torch.compile 友好。</p>
+    </section>
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      <div class="config-table config-table-4col">
+        <div class="config-row config-header">
+          <div class="config-cell">参数</div>
+          <div class="config-cell">默认值</div>
+          <div class="config-cell">说明</div>
+          <div class="config-cell">源码</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>block_size</code></div>
+          <div class="config-cell">16</div>
+          <div class="config-cell">每个 block 存多少 token 的 KV。影响显存利用率和碎片率</div>
+          <div class="config-cell">cache_config.py</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>kv_cache_dtype</code></div>
+          <div class="config-cell">auto</div>
+          <div class="config-cell">KV cache 数据类型。fp8 可节省一半显存</div>
+          <div class="config-cell">cache_config.py</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>--attention-backend</code></div>
+          <div class="config-cell">自动</div>
+          <div class="config-cell">手动指定 attention backend（通常不需要）</div>
+          <div class="config-cell">attention_config.py</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>VLLM_KV_CACHE_LAYOUT</code></div>
+          <div class="config-cell">NHD</div>
+          <div class="config-cell">KV cache 物理排布。HND 对某些 kernel 更友好</div>
+          <div class="config-cell">backends/utils.py</div>
+        </div>
+        <div class="config-row">
+          <div class="config-cell"><code>gpu_memory_utilization</code></div>
+          <div class="config-cell">0.9</div>
+          <div class="config-cell">GPU 显存中用于 KV cache 的比例。决定 num_blocks</div>
+          <div class="config-cell">cache_config.py</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+[
+  {
+    "path": "vllm/v1/engine/core.py:94",
+    "title": "架构总览",
+    "href": "pages/core/architecture.html"
+  },
+  {
+    "path": "vllm/v1/executor/multiproc_executor.py:103",
+    "title": "进程与通信",
+    "href": "pages/distributed/process-communication.html"
+  },
+  {
+    "path": "vllm/v1/core/sched/scheduler.py:334",
+    "title": "调度原理",
+    "href": "pages/core/scheduler.html"
+  },
+  {
+    "path": "vllm/v1/core/kv_cache_manager.py",
+    "title": "KV Cache",
+    "href": "pages/optimizations/kv-cache.html"
+  },
+  {
+    "path": "vllm/v1/attention/ops/paged_attn.py",
+    "title": "PagedAttention",
+    "href": "pages/optimizations/paged-attention.html"
+  },
+  {
+    "path": "vllm/distributed/parallel_state.py:8",
+    "title": "并行策略总览",
+    "href": "pages/distributed/parallelism.html"
+  },
+  {
+    "path": "vllm/model_executor/layers/linear.py:11",
+    "title": "Tensor Parallel",
+    "href": "pages/distributed/tensor-parallel.html"
+  },
+  {
+    "path": "vllm/v1/engine/core.py:187",
+    "title": "Pipeline Parallel",
+    "href": "pages/distributed/pipeline-parallel.html"
+  },
+  {
+    "path": "vllm/model_executor/models/deepseek_v2.py:50",
+    "title": "Expert Parallel",
+    "href": "pages/distributed/expert-parallel.html"
+  },
+  {
+    "path": "vllm/model_executor/models/llama.py:81",
+    "title": "模型结构总览",
+    "href": "pages/models/index.html"
+  },
+  {
+    "path": "vllm/model_executor/models/qwen3_moe.py",
+    "title": "Qwen3 MoE 模型结构",
+    "href": "pages/models/qwen3-moe.html"
+  },
+  {
+    "path": "vllm/model_executor/models/llama.py:81",
+    "title": "Llama 模型结构",
+    "href": "pages/models/llama.html"
+  },
+  {
+    "path": "vllm/model_executor/models/deepseek_v2.py:64",
+    "title": "DeepSeek MLA",
+    "href": "pages/models/deepseek-mla.html"
+  },
+  {
+    "path": "vllm/v1/spec_decode/draft_model.py:17",
+    "title": "投机解码总览",
+    "href": "pages/decoding/speculative-decoding.html"
+  },
+  {
+    "path": "vllm/v1/spec_decode/eagle.py",
+    "title": "EAGLE",
+    "href": "pages/decoding/eagle.html"
+  },
+  {
+    "path": "vllm/v1/spec_decode/ngram_proposer.py",
+    "title": "N-gram 投机解码",
+    "href": "pages/decoding/ngram.html"
+  },
+  {
+    "path": "vllm/v1/core/kv_cache_utils.py",
+    "title": "Prefix Caching",
+    "href": "pages/optimizations/prefix-caching.html"
+  },
+  {
+    "path": "vllm/v1/core/sched/scheduler.py:334",
+    "title": "Chunked Prefill",
+    "href": "pages/optimizations/chunked-prefill.html"
+  },
+  {
+    "path": "vllm/model_executor/layers/quantization/fp8.py",
+    "title": "量化",
+    "href": "pages/optimizations/quantization.html"
+  },
+  {
+    "path": "vllm/distributed/kv_transfer/kv_connector/v1",
+    "title": "Disaggregated Prefill",
+    "href": "pages/distributed/disaggregated-prefill.html"
+  }
+]

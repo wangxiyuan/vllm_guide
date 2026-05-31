@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>术语表 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="glossary">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>reference</span><span>/</span><span>术语表</span></nav>
+
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>reference</span><span>beginner</span><span class="status">outline</span><span>8 min</span></div>
+      <h1>术语表</h1>
+      <p class="hero-text">站点中常用的 vLLM 术语和缩写，后续填充内容时统一使用相同写法。</p>
+    </section>
+
+    <section class="panel">
+      <h2>核心运行</h2>
+      <ul class="checklist">
+        <li><strong>EngineCore</strong>：vLLM V1 内部主循环。</li>
+        <li><strong>Scheduler</strong>：决定每一步执行哪些请求的组件。</li>
+        <li><strong>Executor / Worker</strong>：执行模型 forward 的进程。</li>
+        <li><strong>ModelRunner</strong>：在 worker 中负责模型 forward 的对象。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>内存与缓存</h2>
+      <ul class="checklist">
+        <li><strong>KV Cache</strong>：以 block 为单位管理的 KV 内存。</li>
+        <li><strong>PagedAttention</strong>：基于分页 KV 的 attention kernel。</li>
+        <li><strong>Block Table</strong>：逻辑 token 序列到物理 block 的映射。</li>
+        <li><strong>Prefix Caching</strong>：复用相同前缀的 KV block。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>分布式</h2>
+      <ul class="checklist">
+        <li><strong>TP</strong>：Tensor Parallel，张量切分。</li>
+        <li><strong>PP</strong>：Pipeline Parallel，层切分。</li>
+        <li><strong>DP</strong>：Data Parallel，请求切分。</li>
+        <li><strong>EP</strong>：Expert Parallel，MoE 专家切分。</li>
+        <li><strong>CP / DCP / PCP</strong>：Context Parallel 系列。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>解码</h2>
+      <ul class="checklist">
+        <li><strong>Speculative Decoding</strong>：draft + verify 的解码策略。</li>
+        <li><strong>Draft Model</strong>：投机解码中生成候选 token 的小模型。</li>
+        <li><strong>Rejection Sampler</strong>：验证候选 token 并接受/拒绝。</li>
+        <li><strong>Chunked Prefill</strong>：长 prompt 拆分到多步调度。</li>
+      </ul>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

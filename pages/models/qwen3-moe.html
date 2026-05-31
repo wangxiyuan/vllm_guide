@@ -1,0 +1,87 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Qwen3 MoE 模型结构 - vLLM Visual Guide</title><style>body{margin:0;background:#07111f;color:#e5e7eb;font-family:Arial,'Microsoft YaHei',sans-serif}main{max-width:1350px;margin:auto;padding:22px}.card{background:#111827;border:1px solid #26344e;border-radius:16px;padding:16px;margin:14px 0}.muted{color:#9ca3af}.flow{display:flex;gap:16px;overflow:auto;background:#020617;border:1px solid #26344e;border-radius:16px;padding:16px;margin:12px 0}.nd{min-width:220px;background:#0f172a;border:2px solid #475569;border-radius:14px;padding:12px;position:relative;cursor:pointer;color:#e5e7eb}.nd:not(:last-child):after{content:'\2192';position:absolute;right:-27px;top:42%;font-size:30px;color:#94a3b8}.nd:hover{box-shadow:0 0 0 3px #2563eb66}.nt{text-align:center;font-weight:800;color:white;margin-bottom:8px}.nc{background:#020617;border:1px solid #334155;border-radius:10px;padding:9px;font-family:Consolas,Menlo,monospace;font-size:12px;white-space:pre-wrap;color:#dbeafe}.ns{font-size:12px;color:#cbd5e1;margin-top:6px}.io{border-color:#22d3ee}.emb{border-color:#38bdf8}.norm{border-color:#fbbf24}.attn{border-color:#a78bfa}.dense{border-color:#60a5fa}.moe{border-color:#34d399}.out{border-color:#f87171}.pill{display:inline-block;border:1px solid #334155;background:#0f172a;border-radius:999px;padding:4px 10px;margin:3px;color:#dbeafe;font-size:13px}.section{display:none;margin:12px 0 12px 28px;border-left:3px solid #334155;padding-left:14px}.section.active{display:block}.titlebar{color:#93c5fd;font-weight:700;margin:10px 0}.detail{background:#0b1220;border:1px dashed #334155;border-radius:12px;padding:12px;margin:10px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.mat{border-collapse:collapse;margin:8px auto;font-size:12px}.mat td,.mat th{border:1px solid #334155;padding:5px 8px;text-align:center}.hot{background:#7f1d1d;color:#fecaca}.pick{background:#14532d;color:#bbf7d0}@media(max-width:900px){.grid{grid-template-columns:1fr}}</style></head><body data-page-id="qwen3-moe"><main>
+<section class="card"><div style="display:flex;gap:12px;font-size:13px;"><a href="../../index.html" style="color:#93c5fd;">← 返回首页</a><a href="index.html" style="color:#93c5fd;">模型索引</a><a href="../reference/glossary.html" style="color:#93c5fd;">术语表</a></div></section>
+<section class="card"><h1>Qwen3MoeForCausalLM 展开式交互流程图</h1><div class="muted">点击节点在下方展开子流程；再点折叠。示例：<div class="nc">input_ids = Tensor([12, 7, 8, 16, 23])&#10;positions = Tensor([0, 1, 2, 3, 4])</div><span class="muted">这是一个真实常见场景：从 prompt 的开头连续处理 5 个 token，所以位置从 0 开始递增。positions 表示每个 token 在原始序列里的位置：token 12 在位置0，token 7 在位置1，token 8 在位置2，token 16 在位置3，token 23 在位置4；主要用于 RoPE 位置编码。</span></div><div class="detail"><b>符号说明</b><br><span class="pill">T=5：本次输入有5个token</span><span class="pill">H=4：每个token的hidden向量长度是4</span><span class="pill">V=32：词表大小是32</span><span class="pill">I=8：普通MLP中间层维度是8</span><span class="pill">E=4：MoE专家数量是4</span><span class="pill">K=2：每个token选择2个专家</span><br><span class="muted">注意：页面里的 [5,4]、[5,32] 都表示 tensor 的 shape，不是实际数值。</span></div></section>
+<section class="card"><div id="root"></div></section>
+<script>
+var F={
+top:[["input","io","input_ids","Tensor([12,7,8,16,23])\nshape: [5]","整数 token id"],["embedding","emb","VocabParallelEmbedding (embed_tokens)","hidden_states = embed_tokens(input_ids)\nshape: [5,4]","查 embedding 表"],["decoder","attn","Qwen3MoeDecoderLayer x L","hidden_states, residual = layer(positions, hidden, residual)\n首层 residual=None, 末层后 norm 合入残差","每层: input_layernorm-Attn-post_attention_layernorm-MLP/MoE"],["finalnorm","norm","RMSNorm (model.norm)","hidden_states, _ = norm(hidden_states, residual)\nshape: [5,4] -> [5,4]","融合: residual = hidden_states + residual, 归一化, 丢弃 residual"],["lmhead","out","LogitsProcessor + ParallelLMHead","logits = logits_processor(lm_head, hidden_states)\nshape: [5,4] -> [5,32]","输出词表分数"]],
+decoder:[["din","io","hidden_states, residual","hidden_states [5,4]\nresidual: None (首层) 或 [5,4] (后续层)","DecoderLayer 输入"],["norm1","norm","input_layernorm (RMSNorm)","首层: residual = hidden_states; Xn = RMSNorm(hidden_states)\n后续: Xn, residual = RMSNorm(hidden_states, residual)\nshape: [5,4] -> Xn[5,4], residual[5,4]","首层: 保存原始输入做残差; 后续: 融合加法+归一化"],["attention","attn","Qwen3MoeAttention (self_attn)","hidden_states = self_attn(Xn, positions)\nshape: [5,4] -> [5,4]","点击展开 Attention"],["norm2","norm","post_attention_layernorm (RMSNorm)","Xm, residual = post_attention_layernorm(hidden_states, residual)\nshape: [5,4] -> Xm[5,4], residual[5,4]","融合: residual = hidden_states + residual, 然后归一化"],["mlp","moe","Qwen3MoeSparseMoeBlock / Qwen3MoeMLP","hidden_states = mlp(Xm)\nshape: [5,4] -> [5,4]","点击展开分支"],["dout","io","hidden_states, residual","return hidden_states, residual\nshape: [5,4], [5,4]","DecoderLayer 输出 (残差在下一层 norm 或 model.norm 合入)"]],
+attention:[["ain","io","hidden_states","hidden_states (input_layernorm 输出)\nshape: [5,4]","归一化后的输入"],["qkv","attn","QKVParallelLinear (qkv_proj)","qkv, _ = qkv_proj(hidden_states)\nshape: [5,4] -> [5,12]","12 = q_size(4) + kv_size(4) + kv_size(4)"],["split","attn","split(q, k, v)","q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)\nQ:[5,4] K:[5,4] V:[5,4]","GQA 时 kv_size 可能 < q_size"],["qknorm","norm","q_norm / k_norm (RMSNorm)","Q: [5,4] -> view [5,num_heads,head_dim] -> q_norm -> view [5,4]\nK: [5,4] -> view [5,num_kv_heads,head_dim] -> k_norm -> view [5,4]","按 head_dim 归一化 (Qwen3 特有)"],["rope","attn","RotaryEmbedding (rotary_emb)","q, k = rotary_emb(positions, q, k)\nshape: [5,4] -> [5,4]","positions=[0..4] 旋转 Q,K"],["attncore","attn","Attention (attn)","attn_output = attn(q, k, v)\nshape: [5,4] -> [5,4]","结合 KV cache, multi-head attention"],["oproj","attn","RowParallelLinear (o_proj)","output, _ = o_proj(attn_output)\nshape: [5,4] -> [5,4]","输出投影"]],
+mlp:[["dense","dense","Qwen3MoeMLP","gate_up_proj -> SiluAndMul -> down_proj\nshape: [5,4] -> [5,4]","非专家层，点击展开"],["moe","moe","Qwen3MoeSparseMoeBlock","FusedMoE (含 gate + topk + experts)\nshape: [5,4] -> [5,4]","专家层，点击展开"]],
+dense:[["densein","io","hidden_states","hidden_states\nshape: [5,4]","post_attention_layernorm 输出"],["gateup","dense","MergedColumnParallelLinear (gate_up_proj)","gate_up, _ = gate_up_proj(x)\nshape: [5,4] -> [5,16]","gate_proj/up_proj 合并, 各 8 维"],["swiglu","dense","SiluAndMul (act_fn)","mid = silu(gate) * up\nshape: [5,16] -> [5,8]","gate/up 各 8 维, 输出 8 维"],["down","dense","RowParallelLinear (down_proj)","out, _ = down_proj(mid)\nshape: [5,8] -> [5,4]","回到 hidden size"]],
+moe:[["moein","io","hidden_states","hidden_states (post_attention_layernorm 输出)\nshape: [5,4]","归一化后的输入"],["fusedmoe","moe","FusedMoE (experts)","final = experts(hidden_states=hidden_states)\nshape: [5,4] -> [5,4]","内部: gate -> softmax -> topk -> expert -> combine + shared_expert(可选)"]],
+lmhead:[["hidden","io","hidden_states","hidden_states\nshape: [5,4]","model.norm 输出"],["logitsproc","out","LogitsProcessor","logits = logits_processor(lm_head, hidden_states)\nshape: [5,4] -> [5,32]","内部调用 lm_head, 返回 logits"],["sample","out","Sampler (外部)","next_token = argmax / sample(logits)\nshape: [5,32] -> [5]","每行选下一个 token (在 model 外部)"]]
+};
+var CHILD={decoder:1,attention:1,mlp:1,dense:1,moe:1,lmhead:1};
+var D={
+input:"<div class='detail'><div class='nc'>input_ids = Tensor([12,7,8,16,23])<br>positions = Tensor([0,1,2,3,4])<br>类型：整数 Tensor。positions 给 RoPE 用。</div></div>",
+embedding:"<div class='grid'><div class='detail'><b>按 id 取权重行</b><table class='mat'><tr><th>input_ids</th></tr><tr><td class='hot'>12</td></tr><tr><td class='hot'>7</td></tr><tr><td class='hot'>8</td></tr><tr><td class='hot'>16</td></tr><tr><td class='hot'>23</td></tr></table></div><div class='detail'><b>embedding 权重 [V,H]=[32,4]</b><table class='mat'><tr><th>row</th><th>h0</th><th>h1</th><th>h2</th><th>h3</th></tr><tr class='pick'><td>12</td><td>e12_0</td><td>e12_1</td><td>e12_2</td><td>e12_3</td></tr><tr class='pick'><td>7</td><td>e7_0</td><td>e7_1</td><td>e7_2</td><td>e7_3</td></tr><tr class='pick'><td>8</td><td>e8_0</td><td>e8_1</td><td>e8_2</td><td>e8_3</td></tr><tr class='pick'><td>16</td><td>e16_0</td><td>e16_1</td><td>e16_2</td><td>e16_3</td></tr><tr class='pick'><td>23</td><td>e23_0</td><td>e23_1</td><td>e23_2</td><td>e23_3</td></tr></table><div class='nc'>self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)<br>hidden_states = self.embed_tokens(input_ids)<br>shape = [5,4]</div></div></div>",
+finalnorm:"<div class='detail'><div class='nc'>self.norm = RMSNorm(hidden_size, eps)<br>输入: hidden_states [5,4] (最后一层 mlp 输出), residual [5,4]<br>hidden_states, _ = self.norm(hidden_states, residual)<br>内部: residual = hidden_states + residual, 然后 RMSNorm<br>输出 final hidden [5,4], 丢弃 residual</div></div>",
+norm1:"<div class='detail'><div class='nc'>self.input_layernorm = RMSNorm(hidden_size, eps)<br>首层 (residual is None):<br>  residual = hidden_states  # 保存原始输入做残差<br>  Xn = self.input_layernorm(hidden_states)  # 单纯归一化<br>后续层:<br>  Xn, residual = self.input_layernorm(hidden_states, residual)<br>  # fused_add_rms_norm: residual = hidden_states + residual, 然后 RMSNorm<br>输出: Xn [5,4], residual [5,4]</div></div>",
+norm2:"<div class='detail'><div class='nc'>self.post_attention_layernorm = RMSNorm(hidden_size, eps)<br>输入: hidden_states [5,4] (self_attn 输出), residual [5,4]<br>Xm, residual = self.post_attention_layernorm(hidden_states, residual)<br># fused_add_rms_norm: residual = hidden_states + residual, 然后 RMSNorm<br>输出: Xm [5,4], residual [5,4]</div></div>",
+qkv:"<div class='detail'><div class='nc'>self.qkv_proj = QKVParallelLinear(hidden_size, head_dim, total_num_heads, total_num_kv_heads)<br>qkv, _ = self.qkv_proj(hidden_states)<br>[5,4] -> [5,12]<br>12 = q_size(4) + kv_size(4) + kv_size(4)<br>注意: GQA 时 kv_size 可能 &lt; q_size</div></div>",
+split:"<div class='detail'><div class='nc'>q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)<br>qkv [5,12]<br>Q = qkv[:,0:q_size]  shape [5,4]<br>K = qkv[:,q_size:q_size+kv_size]  shape [5,4]<br>V = qkv[:,q_size+kv_size:]  shape [5,4]</div></div>",
+qknorm:"<div class='detail'><div class='nc'>self.q_norm = RMSNorm(head_dim, eps)<br>self.k_norm = RMSNorm(head_dim, eps)<br>Q [5,4] -> view [5, num_heads, head_dim] = [5,2,2]<br>q_by_head = self.q_norm(q_by_head) -> view back [5,4]<br>K [5,4] -> view [5, num_kv_heads, head_dim] = [5,2,2]<br>k_by_head = self.k_norm(k_by_head) -> view back [5,4]<br>注意: GQA 时 num_kv_heads &lt; num_heads, K 的 view 形状不同<br>Qwen3 特有: 对 Q/K 按 head_dim 做 RMSNorm</div></div>",
+rope:"<div class='detail'><div class='nc'>self.rotary_emb = get_rope(head_dim, max_position, rope_parameters)<br>q, k = self.rotary_emb(positions, q, k)<br>positions = [0,1,2,3,4]<br>5 个 token 分别使用位置 0 到 4 的旋转角<br>Q, K shape 不变：仍是 [5,4]</div></div>",
+attncore:"<div class='detail'><div class='nc'>self.attn = Attention(num_heads, head_dim, scaling, num_kv_heads)<br>attn_output = self.attn(q, k, v)<br>per-head: scores = Q @ K^T / sqrt(head_dim)<br>weights = softmax(scores)<br>out = weights @ V<br>multi-head: [num_heads, 5, head_dim] 计算<br>实际 vLLM 结合 KV cache (PagedAttention)<br>输出 [5,4]</div></div>",
+oproj:"<div class='detail'><div class='nc'>self.o_proj = RowParallelLinear(total_num_heads * head_dim, hidden_size)<br>output, _ = self.o_proj(attn_output)<br>[5,4] @ W_o^T -> [5,4]</div></div>",
+gateup:"<div class='detail'><div class='nc'>self.gate_up_proj = MergedColumnParallelLinear(hidden_size, [intermediate_size]*2)<br>gate_up, _ = self.gate_up_proj(x)<br>[5,4] -> [5,16]<br>16 = gate_proj(8) + up_proj(8)</div></div>",
+swiglu:"<div class='detail'><div class='nc'>self.act_fn = SiluAndMul()<br>gate = gate_up[:,0:8]  shape [5,8]<br>up = gate_up[:,8:16]  shape [5,8]<br>mid = silu(gate) * up  shape [5,8]</div></div>",
+down:"<div class='detail'><div class='nc'>self.down_proj = RowParallelLinear(intermediate_size, hidden_size)<br>out, _ = self.down_proj(mid)<br>[5,8] -> [5,4]</div></div>",
+fusedmoe:"<div class='detail'><div class='nc'>self.experts = FusedMoE(gate=self.gate, shared_experts=self.shared_expert, num_experts=n_routed_experts, top_k=num_experts_per_tok)<br>当前实现 (is_internal_router=True):<br>  FusedMoE 内部自动调用 self.gate(hidden_states)<br>  然后 softmax -> topk -> expert计算 -> weighted combine<br>如果配置了 shared_expert (shared_expert_intermediate_size > 0):<br>  FusedMoE 内部并行执行 shared_expert, 输出 = routed_out + shared_out<br>输出 [5,4]</div></div>",
+logitsproc:"<div class='detail'><div class='nc'>self.logits_processor = LogitsProcessor(vocab_size)<br>self.lm_head = ParallelLMHead(vocab_size, hidden_size)<br>logits = self.logits_processor(self.lm_head, hidden_states)<br>内部: logits = lm_head(hidden_states)  # [5,4] -> [5,32]<br>然后: 可选 scale / soft_cap<br>tie_word_embeddings=True 时 lm_head.weight = embed_tokens.weight</div></div>",
+sample:"<div class='detail'><div class='nc'>Sampler 不在 Qwen3MoeForCausalLM 内部<br>在 vLLM 的 SamplingPipeline 中执行:<br>next_token = argmax(logits) 或 sample(logits)<br>[5,32] -> [5]<br>每个 token 选出下一个 token id</div></div>"
+};
+
+function mkNode(n){
+  return '<button class="nd '+n[1]+'" onclick="tog(\''+n[0]+'\')">'
+    +'<div class="nt">'+n[2]+'</div>'
+    +'<div class="nc">'+n[3].replace(/\n/g,'<br>')+'</div>'
+    +'<div class="ns">'+n[4]+'</div>'
+    +'</button>';
+}
+function mkFlow(key){return '<div class="flow">'+F[key].map(mkNode).join('')+'</div>';}
+
+function parentOf(id){
+  for(var p in F) for(var i=0;i<F[p].length;i++) if(F[p][i][0]===id) return p;
+  return null;
+}
+function closeSibs(id,parent){
+  var container=(parent==='top')?document.getElementById('root'):document.getElementById('exp-'+parent);
+  if(!container)return;
+  var ch=container.children;
+  for(var i=0;i<ch.length;i++){
+    if(ch[i].classList&&ch[i].classList.contains('section')&&ch[i].id!=='exp-'+id)
+      ch[i].classList.remove('active');
+  }
+}
+function tog(id){
+  var parent=parentOf(id);
+  var el=document.getElementById('exp-'+id);
+  var wasOpen=el&&el.classList.contains('active');
+  closeSibs(id,parent);
+  if(el){
+    if(wasOpen){el.classList.remove('active');return;}
+    el.classList.add('active');
+    if(!el.innerHTML) el.innerHTML=sec(id);
+    return;
+  }
+  var p=null;
+  if(parent==='top'){
+    p=document.getElementById('root');
+  }else{
+    p=document.getElementById('exp-'+parent);
+  }
+  if(!p)return;
+  el=document.createElement('div');
+  el.id='exp-'+id;
+  el.className='section active';
+  el.innerHTML=sec(id);
+  p.appendChild(el);
+}
+function sec(id){
+  if(CHILD[id]) return '<div class="titlebar">\u5C55\u5F00\uFF1A'+id+'</div>'+mkFlow(id);
+  return D[id]||'<div class="detail muted">\u6CA1\u6709\u66F4\u591A\u7EC6\u8282</div>';
+}
+document.getElementById('root').innerHTML='<div class="titlebar">\u9876\u5C42\u89C6\u91CE</div>'+mkFlow('top');
+</script></body></html>

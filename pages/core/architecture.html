@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>架构总览 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="architecture">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>core</span><span>/</span><span>架构总览</span></nav>
+
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>core</span><span>beginner</span><span class="status">ready</span><span>15 min</span></div>
+      <h1>架构总览</h1>
+      <p class="hero-text">一次推理请求从 HTTP 到 token 输出的完整路径：跨进程通信、核心循环、调度与执行的协作方式。</p>
+      <div class="tags"><span class="tag">EngineCore</span><span class="tag">Lifecycle</span><span class="tag">Overview</span></div>
+    </section>
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      <p>vLLM V1 是<strong>多进程 + 多线程</strong>架构。以最常见的 MultiprocExecutor（TP/PP 场景）为例：1 个 API 进程 + 1 个 EngineCore 进程 + N 个 Worker 进程。EngineCore 进程内部有 3 个线程，通过 Python Queue 协作。</p>
+      <div class="arch-diagram">
+        <div class="arch-proc arch-proc-api">
+          <div class="arch-proc-title">API 服务进程 <span class="arch-proc-sub">(asyncio 事件循环)</span></div>
+          <div class="arch-box arch-module" data-ref="vllm/entrypoints/openai/api_server.py">HTTP / OpenAI API</div>
+          <div class="arch-box arch-highlight" data-ref="vllm/v1/engine/async_llm.py">AsyncLLM</div>
+          <div class="arch-row">
+            <div class="arch-box arch-module" data-ref="vllm/v1/engine/input_processor.py">InputProcessor</div>
+            <div class="arch-box arch-module" data-ref="vllm/v1/engine/output_processor.py">OutputProcessor</div>
+          </div>
+          <div class="arch-coroutine">
+            <span class="arch-coroutine-tag">asyncio Task</span>
+            <span class="arch-coroutine-name">output_handler</span>
+            <span class="muted">→ OutputProcessor → yield</span>
+          </div>
+        </div>
+
+        <div class="arch-channel">
+          <div class="arch-arrow">EngineCoreRequest ▶</div>
+          <div class="arch-label">ZMQ ROUTER↔DEALER</div>
+          <div class="arch-label">+ mp.Queue (张量)</div>
+          <div class="arch-arrow">◀ EngineCoreOutputs</div>
+          <div class="arch-label">ZMQ PUSH→PULL</div>
+        </div>
+
+        <div class="arch-proc arch-proc-core">
+          <div class="arch-proc-title">EngineCore 进程</div>
+          <div class="arch-thread-row">
+            <div class="arch-thread arch-thread-side">
+              <div class="arch-thread-tag">input_thread</div>
+              <div class="arch-box arch-module" style="font-size:11px">ZMQ DEALER → 反序列化 → preprocess → input_queue</div>
+              <div class="arch-flow-label">abort → aborts_queue</div>
+            </div>
+            <div class="arch-thread arch-thread-main">
+              <div class="arch-thread-tag">主线程 (busy loop)</div>
+              <div class="arch-box arch-highlight" data-ref="vllm/v1/engine/core.py">EngineCore.step()</div>
+              <div class="arch-row">
+                <div class="arch-box arch-module" data-ref="vllm/v1/core/sched/scheduler.py">Scheduler</div>
+                <div class="arch-box arch-module" data-ref="vllm/v1/executor/abstract.py">Executor</div>
+              </div>
+              <div class="arch-box arch-module" data-ref="vllm/v1/core/kv_cache_manager.py">KV Cache Manager</div>
+              <div class="arch-flow-label">input_queue → schedule → execute → update → output_queue</div>
+            </div>
+            <div class="arch-thread arch-thread-side">
+              <div class="arch-thread-tag">output_thread</div>
+              <div class="arch-box arch-module" style="font-size:11px">output_queue → 序列化 → ZMQ PUSH</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="arch-channel">
+          <div class="arch-arrow">SchedulerOutput ▶</div>
+          <div class="arch-label">collective_rpc</div>
+          <div class="arch-arrow">◀ ModelRunnerOutput</div>
+        </div>
+
+        <div class="arch-proc arch-proc-worker">
+          <div class="arch-proc-title">Worker 进程 × N</div>
+          <div class="arch-box arch-highlight" data-ref="vllm/v1/worker/gpu_model_runner.py">ModelRunner</div>
+          <div class="arch-row">
+            <div class="arch-box arch-module">Sampler</div>
+            <div class="arch-box arch-module">Attention</div>
+          </div>
+          <div class="arch-box arch-module">GPU 0 / GPU 1 / ...</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>请求生命周期：10 步走完一次推理</h2>
+      <p>以下是一个 <code>generate()</code> 请求从 HTTP 到输出 token 的完整路径。每一步标注了源码位置。</p>
+
+      <div class="step-list">
+        <div class="step-item" id="step-1">
+          <div class="step-num">1</div>
+          <div class="step-body">
+            <h3>HTTP 请求到达</h3>
+            <p>OpenAI 兼容 API 收到请求，调用 <code>AsyncLLM.generate()</code>。</p>
+            <code class="step-ref">vllm/v1/engine/async_llm.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-2">
+          <div class="step-num">2</div>
+          <div class="step-body">
+            <h3>输入处理</h3>
+            <p><code>InputProcessor</code> 将原始 prompt 分词、校验、处理多模态特征，组装为 <code>EngineCoreRequest</code>（msgspec Struct）。</p>
+            <code class="step-ref">vllm/v1/engine/input_processor.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-3">
+          <div class="step-num">3</div>
+          <div class="step-body">
+            <h3>跨进程发送</h3>
+            <p><code>AsyncMPClient</code> 将 <code>EngineCoreRequest</code> 序列化后通过 ZMQ ROUTER socket 发送到 EngineCore 进程。</p>
+            <code class="step-ref">vllm/v1/engine/core_client.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-4">
+          <div class="step-num">4</div>
+          <div class="step-body">
+            <h3>EngineCore 接收并预处理</h3>
+            <p>EngineCore 的输入线程从 ZMQ 接收、反序列化，<code>preprocess_add_request()</code> 转为内部 <code>Request</code> 对象（含结构化输出 grammar 初始化），推入 <code>input_queue</code>。</p>
+            <code class="step-ref">vllm/v1/engine/core.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-5">
+          <div class="step-num">5</div>
+          <div class="step-body">
+            <h3>进入调度队列</h3>
+            <p>Busy loop 的 <code>_process_input_queue()</code> 取出请求，调用 <code>Scheduler.add_request()</code>，请求状态变为 <code>WAITING</code>，进入等待队列。</p>
+            <code class="step-ref">vllm/v1/core/sched/scheduler.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-6">
+          <div class="step-num">6</div>
+          <div class="step-body">
+            <h3>调度（schedule）</h3>
+            <p>核心循环调用 <code>Scheduler.schedule()</code>。先为 RUNNING 请求分配 token budget 和 KV blocks，再从 WAITING 队列中接纳新请求。KV 不足时抢占低优先级请求。产出 <code>SchedulerOutput</code>。</p>
+            <code class="step-ref">vllm/v1/core/sched/scheduler.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-7">
+          <div class="step-num">7</div>
+          <div class="step-body">
+            <h3>模型执行（execute）</h3>
+            <p><code>Executor.execute_model(SchedulerOutput)</code> 将调度结果分发到 Worker 进程。<code>ModelRunner</code> 准备输入张量、执行 forward pass、返回 <code>ModelRunnerOutput</code>（含采样结果）。</p>
+            <code class="step-ref">vllm/v1/executor/abstract.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-8">
+          <div class="step-num">8</div>
+          <div class="step-body">
+            <h3>输出处理（update_from_output）</h3>
+            <p><code>Scheduler.update_from_output()</code> 处理每个请求的采样结果：追加 token、检查停止条件（max_tokens / stop strings / 重复）、处理投机解码接受/拒绝。已完成的请求释放 KV blocks。产出 <code>EngineCoreOutputs</code>。</p>
+            <code class="step-ref">vllm/v1/core/sched/scheduler.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-9">
+          <div class="step-num">9</div>
+          <div class="step-body">
+            <h3>跨进程返回</h3>
+            <p>EngineCore 的输出线程将 <code>EngineCoreOutputs</code> 序列化后通过 ZMQ PUSH socket 发送回 API 服务进程。</p>
+            <code class="step-ref">vllm/v1/engine/core.py</code>
+          </div>
+        </div>
+
+        <div class="step-item" id="step-10">
+          <div class="step-num">10</div>
+          <div class="step-body">
+            <h3>反分词与流式输出</h3>
+            <p><code>OutputProcessor</code> 调用 <code>IncrementalDetokenizer</code> 将 token ID 转回文本，检测 stop strings，组装 <code>RequestOutput</code>。生成器 <code>yield</code> 给 API 层，以 SSE 流式返回给客户端。</p>
+            <code class="step-ref">vllm/v1/engine/output_processor.py</code>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>核心循环：EngineCore.step()</h2>
+      <p>步骤 6-8 构成 EngineCore 的<strong>核心迭代</strong>，每步循环执行一次。这是 vLLM 推理的"心跳"。</p>
+      <pre><code># vllm/v1/engine/core.py
+def step(self):
+    if not self.scheduler.has_requests():
+        return {}, False
+
+    scheduler_output = self.scheduler.schedule()        # 调度
+    future = self.model_executor.execute_model(          # 执行
+        scheduler_output, non_block=True)
+    grammar_output = self.scheduler.get_grammar_bitmask( # 结构化输出
+        scheduler_output)
+    model_output = future.result()                       # 取结果
+    if model_output is None:
+        model_output = self.model_executor.sample_tokens(grammar_output)
+
+    engine_core_outputs = self.scheduler.update_from_output(  # 更新
+        scheduler_output, model_output)
+
+    return engine_core_outputs, \
+           scheduler_output.total_num_scheduled_tokens > 0</code></pre>
+      <p class="muted">Busy loop 不断调用 <code>_process_input_queue()</code> → <code>_process_engine_step()</code>，形成"接收请求 → 调度执行 → 输出结果"的连续循环。</p>
+    </section>
+
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

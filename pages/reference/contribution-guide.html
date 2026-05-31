@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>内容填充指南 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="contribution-guide">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>reference</span><span>/</span><span>内容填充指南</span></nav>
+
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>reference</span><span>beginner</span><span class="status">ready</span><span>8 min</span></div>
+      <h1>内容填充指南</h1>
+      <p class="hero-text">站点框架已完成，本指南说明协作者如何向每个专题页填充技术分析内容。</p>
+    </section>
+
+    <section class="panel">
+      <h2>1. 本地预览</h2>
+      <p>本站点是纯静态站点，所有数据已内联到 <code>assets/js/site-data.js</code>，无需任何服务进程。</p>
+      <ul class="checklist">
+        <li>直接双击 <code>guide/index.html</code> 即可在浏览器中查看。</li>
+        <li>也可部署到 GitHub Pages 等静态托管：把 <code>guide/</code> 推送到仓库的 Pages 分支或子目录即可。</li>
+        <li>可选：本地仍可起 <code>python -m http.server</code>，但不是必须。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>2. 数据更新</h2>
+      <p>真实数据保存在 <code>assets/data/*.json</code>。修改后请运行以下脚本重新生成 <code>assets/js/site-data.js</code>：</p>
+      <pre><code>python guide/scripts/bundle-data.py</code></pre>
+      <p>该脚本会读取 <code>topics.json</code>、<code>learning-paths.json</code>、<code>code-map.json</code> 并写入 JS 全局变量 <code>window.SITE_DATA</code>。</p>
+    </section>
+
+    <section class="panel">
+      <h2>3. 新增专题</h2>
+      <ol>
+        <li>复制 <code>assets/templates/topic-page.html</code> 到 <code>pages/&lt;分类&gt;/&lt;topic&gt;.html</code>。</li>
+        <li>编辑 <code>assets/data/topics.json</code>，添加专题元信息。</li>
+        <li>必要时在 <code>assets/data/code-map.json</code> 增加源码索引。</li>
+        <li>必要时新建 <code>pages/&lt;分类&gt;/</code> 子目录。</li>
+      </ol>
+    </section>
+
+    <section class="panel">
+      <h2>4. 专题页填充清单</h2>
+      <ul class="checklist">
+        <li>更新 hero 描述和阅读时间。</li>
+        <li>补充“本页要回答的问题”里每一个问题的答案。</li>
+        <li>在交互区接入流程图或 step JSON 动画。</li>
+        <li>在源码入口列出真实代码引用，使用 <code>path:line</code> 格式。</li>
+        <li>状态从 <code>todo / outline</code> 升级到 <code>draft / ready</code>。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>5. 状态规范</h2>
+      <ul class="checklist">
+        <li><code>todo</code>：尚未开始。</li>
+        <li><code>outline</code>：已列出结构和问题清单。</li>
+        <li><code>draft</code>：内容已写但尚需 review。</li>
+        <li><code>ready</code>：内容可发布。</li>
+        <li><code>advanced</code>：高级专题，默认不在入门路径中。</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>6. 目录与分类</h2>
+      <ul class="checklist">
+        <li><code>pages/core/</code>：架构、调度等核心运行链路。</li>
+        <li><code>pages/distributed/</code>：进程通信、并行、KV 传输。</li>
+        <li><code>pages/decoding/</code>：投机解码、采样等解码算法。</li>
+        <li><code>pages/optimizations/</code>：KV cache、prefix caching、量化等性能专题。</li>
+        <li><code>pages/models/</code>：各模型结构专题。</li>
+        <li><code>pages/reference/</code>：术语表、内容填充指南。</li>
+      </ul>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

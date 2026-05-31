@@ -1,0 +1,22 @@
+[
+  {
+    "title": "入门路径",
+    "items": ["architecture", "process-communication", "scheduler", "kv-cache", "model-structures"]
+  },
+  {
+    "title": "核心性能路径",
+    "items": ["scheduler", "kv-cache", "paged-attention", "prefix-caching", "chunked-prefill"]
+  },
+  {
+    "title": "分布式路径",
+    "items": ["process-communication", "parallelism", "tensor-parallel", "data-parallel", "sequence-parallel", "context-parallel", "pipeline-parallel", "expert-parallel", "disaggregated-prefill"]
+  },
+  {
+    "title": "模型结构路径",
+    "items": ["model-structures"]
+  },
+  {
+    "title": "解码优化路径",
+    "items": ["speculative-decoding", "ngram", "eagle", "medusa", "dflash", "step3p5", "suffix-decoding", "gemma4-spec"]
+  }
+]

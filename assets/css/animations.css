@@ -1,0 +1,6 @@
+.topic-card, .pipeline span, .filter { transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease; }
+@keyframes pulse-token {
+  0%, 100% { box-shadow: 0 0 0 0 #60a5fa66; }
+  50% { box-shadow: 0 0 0 8px #60a5fa00; }
+}
+.is-active-token { animation: pulse-token 1.2s infinite; }

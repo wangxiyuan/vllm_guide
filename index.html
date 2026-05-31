@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vLLM Visual Guide</title>
+  <link rel="stylesheet" href="assets/css/base.css">
+  <link rel="stylesheet" href="assets/css/layout.css">
+  <link rel="stylesheet" href="assets/css/components.css">
+  <link rel="stylesheet" href="assets/css/animations.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="index.html">vLLM Visual Guide</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <svg class="hero-dots" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid slice" fill="none">
+        <circle cx="80" cy="60" r="2" fill="#60a5fa" style="animation-delay:0s"/>
+        <circle cx="200" cy="180" r="1.5" fill="#a78bfa" style="animation-delay:1s"/>
+        <circle cx="350" cy="40" r="2.5" fill="#34d399" style="animation-delay:2s"/>
+        <circle cx="520" cy="220" r="1.8" fill="#60a5fa" style="animation-delay:0.5s"/>
+        <circle cx="680" cy="80" r="2" fill="#fbbf24" style="animation-delay:3s"/>
+        <circle cx="800" cy="160" r="1.5" fill="#a78bfa" style="animation-delay:1.5s"/>
+        <circle cx="950" cy="50" r="2.2" fill="#34d399" style="animation-delay:2.5s"/>
+        <circle cx="1100" cy="200" r="1.8" fill="#60a5fa" style="animation-delay:4s"/>
+        <circle cx="150" cy="250" r="1.2" fill="#f87171" style="animation-delay:1.2s"/>
+        <circle cx="450" cy="120" r="1.6" fill="#fbbf24" style="animation-delay:3.5s"/>
+        <circle cx="750" cy="270" r="2" fill="#a78bfa" style="animation-delay:0.8s"/>
+        <circle cx="1000" cy="130" r="1.4" fill="#34d399" style="animation-delay:2.2s"/>
+      </svg>
+      <div class="hero-content">
+        <h1>用动画理解 vLLM 的技术实现</h1>
+        <p class="hero-text">从架构总览到投机解码，逐个专题拆解 vLLM 的核心机制。点击任意卡片开始阅读。</p>
+        <div class="hero-stats" id="hero-stats"></div>
+      </div>
+    </section>
+
+    <div id="topics" class="card-list"></div>
+  </main>
+
+  <script src="assets/js/site-data.js"></script>
+  <script src="assets/js/app.js"></script>
+  <script src="assets/js/home.js"></script>
+</body>
+</html>
