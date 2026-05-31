@@ -32,12 +32,41 @@
       </svg>
       <div class="hero-content">
         <h1>用动画理解 vLLM 的技术实现</h1>
-        <p class="hero-text">从架构总览到投机解码，逐个专题拆解 vLLM 的核心机制。点击任意卡片开始阅读。</p>
+        <p class="hero-text">从架构总览到投机解码，逐个专题拆解 vLLM 的核心机制。搜索专题，按学习状态筛选，点击卡片开始阅读。</p>
         <div class="hero-stats" id="hero-stats"></div>
       </div>
     </section>
 
+    <section class="learning-lab" aria-labelledby="learning-lab-title">
+      <div>
+        <p class="eyebrow">Interactive Learning</p>
+        <h2 id="learning-lab-title">建议学习路线</h2>
+        <p class="muted">先理解请求生命周期，再进入调度、KV Cache、PagedAttention 和分布式策略。</p>
+      </div>
+      <div class="learning-path-mini">
+        <span>架构总览</span>
+        <span>调度原理</span>
+        <span>KV Cache</span>
+        <span>PagedAttention</span>
+        <span>并行策略</span>
+      </div>
+    </section>
+
+    <section class="topic-toolbar" aria-label="专题筛选">
+      <label class="topic-search">
+        <span>搜索专题</span>
+        <input id="topic-search" type="search" placeholder="输入 Scheduler、KV、PagedAttention..." autocomplete="off">
+      </label>
+      <div class="topic-filters" role="group" aria-label="状态筛选">
+        <button class="filter-chip is-active" type="button" data-filter="all">全部</button>
+        <button class="filter-chip" type="button" data-filter="ready">可阅读</button>
+        <button class="filter-chip" type="button" data-filter="outline">有大纲</button>
+        <button class="filter-chip" type="button" data-filter="todo">规划中</button>
+      </div>
+    </section>
+
     <div id="topics" class="card-list"></div>
+    <div id="topic-empty" class="placeholder" hidden>没有匹配的专题</div>
   </main>
 
   <script src="assets/js/site-data.js"></script>

@@ -2,8 +2,13 @@ function main() {
   var data = window.SITE_DATA;
   if (!data) return;
   var container = document.getElementById("topics");
+  var emptyEl = document.getElementById("topic-empty");
+  var searchEl = document.getElementById("topic-search");
+  var filterButtons = Array.prototype.slice.call(document.querySelectorAll(".filter-chip"));
   if (!container) return;
 
+  var currentFilter = "all";
+  var currentQuery = "";
   var categoryOrder = ["core", "distributed", "decoding", "optimization", "model", "reference"];
   var categoryLabels = {
     core: "核心引擎",
@@ -54,71 +59,111 @@ function main() {
       '<div><span class="hero-stat-num">' + (totalCount - activeCount - outlineCount) + '</span>规划中</div>';
   }
 
-  var html = "";
-  categoryOrder.forEach(function (cat) {
-    var topics = grouped[cat];
-    if (!topics) return;
-    var color = categoryColors[cat] || "#60a5fa";
-    var activeInGroup = topics.filter(function (t) { return activeStatuses.indexOf(t.status) >= 0; }).length;
-
-    html += '<div class="card-group card-group-collapsed" data-category="' + cat + '">';
-    html += '<div class="card-group-header" style="background:' + color + '12;border:1px solid ' + color + '25" onclick="toggleGroup(this)">';
-    html += '<div class="card-group-left">';
-    html += '<div class="card-group-icon" style="color:' + color + '">' + (categoryIcons[cat] || '') + '</div>';
-    html += '<h2 class="card-group-title" style="color:' + color + '">' + (categoryLabels[cat] || cat) + '</h2>';
-    html += '</div>';
-    html += '<div class="card-group-right">';
-    html += '<div class="card-group-count">' + activeInGroup + '/' + topics.length + ' 已写</div>';
-    html += '<svg class="card-group-chevron" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-    html += '</div>';
-    html += '</div>';
-
-    html += '<div class="card-group-body">';
-    topics.forEach(function (topic) {
-      var isActive = activeStatuses.indexOf(topic.status) >= 0;
-      var isOutline = outlineStatuses.indexOf(topic.status) >= 0;
-      var cardClass = isActive ? "card-row" : (isOutline ? "card-row card-row-outline" : "card-row card-row-dim");
-      html += '<a class="' + cardClass + '" href="' + topic.href + '">';
-      html += '<div class="card-row-main">';
-      html += '<div class="card-row-top">';
-      html += '<span class="card-row-category" style="color:' + color + '">' + (categoryLabels[cat] || cat) + '</span>';
-      if (topic.level) {
-        var levelColors = { beginner: "#34d399", intermediate: "#60a5fa", advanced: "#a78bfa" };
-        var levelLabels = { beginner: "入门", intermediate: "进阶", advanced: "深入" };
-        html += '<span class="card-row-level" style="color:' + (levelColors[topic.level] || "#94a3b8") + '">' + (levelLabels[topic.level] || topic.level) + '</span>';
-      }
-      html += '</div>';
-      html += '<h2>' + topic.title + '</h2>';
-      html += '<p>' + topic.subtitle + '</p>';
-      if (topic.tags && topic.tags.length > 0) {
-        html += '<div class="card-row-tags">';
-        topic.tags.forEach(function (tag) {
-          html += '<span class="card-row-tag">' + tag + '</span>';
-        });
-        html += '</div>';
-      }
-      html += '</div>';
-      html += '<div class="card-row-side">';
-      html += '<span class="status status-' + topic.status + '">' + topic.status + '</span>';
-      html += '<span class="muted">' + topic.readingMinutes + ' min</span>';
-      html += '</div>';
-      html += '</a>';
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"]/g, function (char) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char];
     });
-    html += '</div>';
-    html += '</div>';
+  }
+
+  function getStatusGroup(status) {
+    if (activeStatuses.indexOf(status) >= 0) return "ready";
+    if (outlineStatuses.indexOf(status) >= 0) return "outline";
+    return "todo";
+  }
+
+  function topicMatches(topic) {
+    var statusGroup = getStatusGroup(topic.status);
+    var queryText = [topic.title, topic.subtitle, topic.category, topic.level].concat(topic.tags || []).join(" ").toLowerCase();
+    return (currentFilter === "all" || currentFilter === statusGroup) && (!currentQuery || queryText.indexOf(currentQuery) >= 0);
+  }
+
+  function renderTopics() {
+    var html = "";
+    var visibleCount = 0;
+    categoryOrder.forEach(function (cat) {
+      var topics = (grouped[cat] || []).filter(topicMatches);
+      if (!topics.length) return;
+      visibleCount += topics.length;
+      var color = categoryColors[cat] || "#60a5fa";
+      var activeInGroup = topics.filter(function (t) { return activeStatuses.indexOf(t.status) >= 0; }).length;
+      var isCollapsed = cat !== "core" && !currentQuery && currentFilter === "all";
+      var bodyId = "topic-group-" + cat;
+
+      html += '<div class="card-group' + (isCollapsed ? ' card-group-collapsed' : '') + '" data-category="' + cat + '">';
+      html += '<button class="card-group-header" type="button" style="background:' + color + '12;border:1px solid ' + color + '25" aria-expanded="' + (!isCollapsed) + '" aria-controls="' + bodyId + '">';
+      html += '<div class="card-group-left">';
+      html += '<div class="card-group-icon" style="color:' + color + '">' + (categoryIcons[cat] || '') + '</div>';
+      html += '<h2 class="card-group-title" style="color:' + color + '">' + (categoryLabels[cat] || cat) + '</h2>';
+      html += '</div>';
+      html += '<div class="card-group-right">';
+      html += '<div class="card-group-count">' + activeInGroup + '/' + topics.length + ' 可阅读</div>';
+      html += '<svg class="card-group-chevron" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+      html += '</div>';
+      html += '</button>';
+
+      html += '<div class="card-group-body" id="' + bodyId + '">';
+      topics.forEach(function (topic) {
+        var isActive = activeStatuses.indexOf(topic.status) >= 0;
+        var isOutline = outlineStatuses.indexOf(topic.status) >= 0;
+        var cardClass = isActive ? "card-row" : (isOutline ? "card-row card-row-outline" : "card-row card-row-dim");
+        html += '<a class="' + cardClass + '" href="' + escapeHtml(topic.href) + '">';
+        html += '<div class="card-row-main">';
+        html += '<div class="card-row-top">';
+        html += '<span class="card-row-category" style="color:' + color + '">' + (categoryLabels[cat] || cat) + '</span>';
+        if (topic.level) {
+          var levelColors = { beginner: "#34d399", intermediate: "#60a5fa", advanced: "#a78bfa" };
+          var levelLabels = { beginner: "入门", intermediate: "进阶", advanced: "深入" };
+          html += '<span class="card-row-level" style="color:' + (levelColors[topic.level] || "#94a3b8") + '">' + (levelLabels[topic.level] || topic.level) + '</span>';
+        }
+        html += '</div>';
+        html += '<h2>' + escapeHtml(topic.title) + '</h2>';
+        html += '<p>' + escapeHtml(topic.subtitle) + '</p>';
+        if (topic.tags && topic.tags.length > 0) {
+          html += '<div class="card-row-tags">';
+          topic.tags.forEach(function (tag) {
+            html += '<span class="card-row-tag">' + escapeHtml(tag) + '</span>';
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+        html += '<div class="card-row-side">';
+        html += '<span class="status status-' + topic.status + '">' + topic.status + '</span>';
+        html += '<span class="muted">' + topic.readingMinutes + ' min</span>';
+        html += '</div>';
+        html += '</a>';
+      });
+      html += '</div>';
+      html += '</div>';
+    });
+
+    container.innerHTML = html;
+    if (emptyEl) emptyEl.hidden = visibleCount > 0;
+  }
+
+  container.addEventListener("click", function (event) {
+    var header = event.target.closest(".card-group-header");
+    if (!header) return;
+    var group = header.parentElement;
+    var isCollapsed = group.classList.toggle("card-group-collapsed");
+    header.setAttribute("aria-expanded", String(!isCollapsed));
   });
 
-  container.innerHTML = html;
-}
-
-function toggleGroup(header) {
-  var group = header.parentElement;
-  var isCollapsed = group.classList.contains("card-group-collapsed");
-  if (isCollapsed) {
-    group.classList.remove("card-group-collapsed");
-  } else {
-    group.classList.add("card-group-collapsed");
+  if (searchEl) {
+    searchEl.addEventListener("input", function () {
+      currentQuery = searchEl.value.trim().toLowerCase();
+      renderTopics();
+    });
   }
+
+  filterButtons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      currentFilter = button.getAttribute("data-filter") || "all";
+      filterButtons.forEach(function (item) { item.classList.toggle("is-active", item === button); });
+      renderTopics();
+    });
+  });
+
+  renderTopics();
 }
 
 main();

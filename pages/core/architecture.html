@@ -19,7 +19,7 @@
     <section class="topic-hero panel">
       <div class="card-meta"><span>core</span><span>beginner</span><span class="status">ready</span><span>15 min</span></div>
       <h1>架构总览</h1>
-      <p class="hero-text">一次推理请求从 HTTP 到 token 输出的完整路径：跨进程通信、核心循环、调度与执行的协作方式。</p>
+      <p class="hero-text">一次推理请求从 HTTP 到 token 输出的完整路径：<span data-term="communication" data-tip="跨进程、跨线程或跨 GPU 传递请求、张量或控制消息。">跨进程通信</span>、核心循环、调度与执行的协作方式。</p>
       <div class="tags"><span class="tag">EngineCore</span><span class="tag">Lifecycle</span><span class="tag">Overview</span></div>
     </section>
 
@@ -41,55 +41,6 @@
             <span class="muted">→ OutputProcessor → yield</span>
           </div>
         </div>
-
-        <div class="arch-channel">
-          <div class="arch-arrow">EngineCoreRequest ▶</div>
-          <div class="arch-label">ZMQ ROUTER↔DEALER</div>
-          <div class="arch-label">+ mp.Queue (张量)</div>
-          <div class="arch-arrow">◀ EngineCoreOutputs</div>
-          <div class="arch-label">ZMQ PUSH→PULL</div>
-        </div>
-
-        <div class="arch-proc arch-proc-core">
-          <div class="arch-proc-title">EngineCore 进程</div>
-          <div class="arch-thread-row">
-            <div class="arch-thread arch-thread-side">
-              <div class="arch-thread-tag">input_thread</div>
-              <div class="arch-box arch-module" style="font-size:11px">ZMQ DEALER → 反序列化 → preprocess → input_queue</div>
-              <div class="arch-flow-label">abort → aborts_queue</div>
-            </div>
-            <div class="arch-thread arch-thread-main">
-              <div class="arch-thread-tag">主线程 (busy loop)</div>
-              <div class="arch-box arch-highlight" data-ref="vllm/v1/engine/core.py">EngineCore.step()</div>
-              <div class="arch-row">
-                <div class="arch-box arch-module" data-ref="vllm/v1/core/sched/scheduler.py">Scheduler</div>
-                <div class="arch-box arch-module" data-ref="vllm/v1/executor/abstract.py">Executor</div>
-              </div>
-              <div class="arch-box arch-module" data-ref="vllm/v1/core/kv_cache_manager.py">KV Cache Manager</div>
-              <div class="arch-flow-label">input_queue → schedule → execute → update → output_queue</div>
-            </div>
-            <div class="arch-thread arch-thread-side">
-              <div class="arch-thread-tag">output_thread</div>
-              <div class="arch-box arch-module" style="font-size:11px">output_queue → 序列化 → ZMQ PUSH</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="arch-channel">
-          <div class="arch-arrow">SchedulerOutput ▶</div>
-          <div class="arch-label">collective_rpc</div>
-          <div class="arch-arrow">◀ ModelRunnerOutput</div>
-        </div>
-
-        <div class="arch-proc arch-proc-worker">
-          <div class="arch-proc-title">Worker 进程 × N</div>
-          <div class="arch-box arch-highlight" data-ref="vllm/v1/worker/gpu_model_runner.py">ModelRunner</div>
-          <div class="arch-row">
-            <div class="arch-box arch-module">Sampler</div>
-            <div class="arch-box arch-module">Attention</div>
-          </div>
-          <div class="arch-box arch-module">GPU 0 / GPU 1 / ...</div>
-        </div>
       </div>
     </section>
 
@@ -97,7 +48,20 @@
       <h2>请求生命周期：10 步走完一次推理</h2>
       <p>以下是一个 <code>generate()</code> 请求从 HTTP 到输出 token 的完整路径。每一步标注了源码位置。</p>
 
-      <div class="step-list">
+      <div class="step-player" id="lifecycle-player">
+        <div class="step-player-head">
+          <h3 class="step-player-title" data-step-title>准备开始</h3>
+          <span class="step-player-progress" data-step-progress>0 / 10</span>
+        </div>
+        <p class="step-player-text" data-step-text>点击下一步，逐帧追踪请求从 HTTP 到 token 输出的完整路径。</p>
+        <div class="step-player-actions">
+          <button type="button" data-step-prev disabled>上一步</button>
+          <button type="button" data-step-next>下一步</button>
+          <button type="button" data-step-reset>重置</button>
+        </div>
+      </div>
+
+      <div class="step-list" id="lifecycle-steps">
         <div class="step-item" id="step-1">
           <div class="step-num">1</div>
           <div class="step-body">
@@ -187,6 +151,7 @@
             <code class="step-ref">vllm/v1/engine/output_processor.py</code>
           </div>
         </div>
+        </div>
       </div>
     </section>
 
@@ -216,6 +181,7 @@ def step(self):
     </section>
 
   </main>
+  <script src="../../assets/js/animation-engine.js"></script>
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

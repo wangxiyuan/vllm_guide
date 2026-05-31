@@ -19,7 +19,7 @@
     <section class="topic-hero panel">
       <div class="card-meta"><span>core</span><span>intermediate</span><span class="status">ready</span><span>22 min</span></div>
       <h1>进程与通信</h1>
-      <p class="hero-text">ZMQ 帧协议、共享内存环形缓冲区、线程 Queue 协作、NCCL 集合通信、TP/SP/CP 卡间通信模式——vLLM V1 各层通信机制的实现细节。</p>
+      <p class="hero-text">ZMQ 帧协议、共享内存环形缓冲区、线程 Queue 协作、<span data-term="NCCL" data-tip="GPU 间集合通信库，vLLM 的 TP/SP/CP 等并行策略依赖它传递张量。">NCCL 集合通信</span>、TP/SP/CP 卡间通信模式——vLLM V1 各层通信机制的实现细节。</p>
       <div class="tags"><span class="tag">ZMQ</span><span class="tag">Shared Memory</span><span class="tag">NCCL</span><span class="tag">TP</span><span class="tag">SP</span><span class="tag">CP</span></div>
     </section>
 
@@ -55,6 +55,58 @@
             <div class="comm-item" data-ref="vllm/distributed/parallel_state.py">PP: send/recv (阶段间中间张量)</div>
           </div>
           <div class="comm-layer-note">延迟：μs 级（NVLink）/ ms 级（PCIe + 网络）</div>
+        </div>
+      </div>
+
+      <div class="interactive-sim panel" data-sim="comm">
+        <div class="sim-head">
+          <div>
+            <p class="eyebrow">Interactive Simulation</p>
+            <h3>模拟一次推理的通信路径</h3>
+            <p class="muted">请求依次经过跨进程 → 线程间 → 跨 GPU 三层通信，点击观察每层的数据流转。</p>
+          </div>
+          <div class="sim-controls">
+            <button type="button" data-sim-prev disabled>上一步</button>
+            <button type="button" data-sim-next>下一步</button>
+            <button type="button" data-sim-reset>重置</button>
+          </div>
+        </div>
+        <div class="sim-board sim-comm-board">
+          <div class="sim-comm-layer" data-comm="cross-proc">
+            <div class="sim-comm-title">跨进程</div>
+            <div class="sim-comm-items">
+              <div class="sim-comm-node">API</div>
+              <div class="sim-comm-arrow">ZMQ ▶</div>
+              <div class="sim-comm-node">EngineCore</div>
+              <div class="sim-comm-arrow">ShmRingBuffer ▶</div>
+              <div class="sim-comm-node">Worker</div>
+            </div>
+          </div>
+          <div class="sim-comm-layer" data-comm="intra-proc">
+            <div class="sim-comm-title">进程内线程间</div>
+            <div class="sim-comm-items">
+              <div class="sim-comm-node">input_thread</div>
+              <div class="sim-comm-arrow">Queue ▶</div>
+              <div class="sim-comm-node">主线程</div>
+              <div class="sim-comm-arrow">Queue ▶</div>
+              <div class="sim-comm-node">output_thread</div>
+            </div>
+          </div>
+          <div class="sim-comm-layer" data-comm="cross-gpu">
+            <div class="sim-comm-title">跨 GPU</div>
+            <div class="sim-comm-items">
+              <div class="sim-comm-node">GPU 0</div>
+              <div class="sim-comm-arrow">NCCL ▶</div>
+              <div class="sim-comm-node">GPU 1</div>
+              <div class="sim-comm-arrow">NCCL ▶</div>
+              <div class="sim-comm-node">GPU N</div>
+            </div>
+          </div>
+        </div>
+        <div class="sim-status">
+          <strong data-sim-title>初始状态</strong>
+          <span data-sim-progress>0 / 6</span>
+          <p data-sim-text>点击下一步，追踪一次推理请求的通信路径。</p>
         </div>
       </div>
     </section>
@@ -704,6 +756,7 @@ Embedding (完整)
       <code class="step-ref">vllm/v1/engine/core.py</code>
     </section>
   </main>
+  <script src="../../assets/js/animation-engine.js"></script>
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

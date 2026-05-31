@@ -19,7 +19,7 @@
     <section class="topic-hero panel">
       <div class="card-meta"><span>optimization</span><span>intermediate</span><span class="status">ready</span><span>20 min</span></div>
       <h1>PagedAttention</h1>
-      <p class="hero-text">分页式 KV 访问：让 Attention kernel 从不连续的显存块中读取 KV，告别显存碎片</p>
+      <p class="hero-text">分页式 KV 访问：让 Attention kernel 从不连续的显存块中读取 <span data-term="kv cache">KV</span>，告别显存碎片</p>
       <div class="tags"><span class="tag">PagedAttention</span><span class="tag">Block Table</span><span class="tag">Slot Mapping</span><span class="tag">Attention Backend</span></div>
     </section>
 
@@ -81,6 +81,48 @@
       <p>关键收益：<strong>显存按需分配</strong>（不用预分配连续大块）、<strong>前缀共享</strong>（相同 prompt 的 block 只存一份）、<strong>零碎片</strong>（block 大小统一，释放后立即可用）。</p>
 
       <p>注意：V1 代码中没有名为 PagedAttention 的类——它是一种<strong>整体设计模式</strong>，体现在 Block Table、Slot Mapping、Attention Metadata 等数据结构和 kernel 的协作中。</p>
+
+      <div class="interactive-sim panel" data-sim="pa-rw">
+        <div class="sim-head">
+          <div>
+            <p class="eyebrow">Interactive Simulation</p>
+            <h3>读写路径对比</h3>
+            <p class="muted">写路径用 slot_mapping 把新 KV 散列写入 block；读路径用 block_table 从不连续 block 中读取历史 KV。点击观察两条路径的差异。</p>
+          </div>
+          <div class="sim-controls">
+            <button type="button" data-sim-prev disabled>上一步</button>
+            <button type="button" data-sim-next>下一步</button>
+            <button type="button" data-sim-reset>重置</button>
+          </div>
+        </div>
+        <div class="sim-board sim-pa-rw-board">
+          <div class="sim-pa-path" data-pa-path="write">
+            <div class="sim-pa-path-label">写路径 (slot_mapping)</div>
+            <div class="sim-pa-path-flow">
+              <div class="sim-pa-node">新 K/V</div>
+              <div class="sim-pa-arrow">scatter ▶</div>
+              <div class="sim-pa-node">slot_mapping</div>
+              <div class="sim-pa-arrow">▶</div>
+              <div class="sim-pa-node">物理 block</div>
+            </div>
+          </div>
+          <div class="sim-pa-path" data-pa-path="read">
+            <div class="sim-pa-path-label">读路径 (block_table)</div>
+            <div class="sim-pa-path-flow">
+              <div class="sim-pa-node">Query</div>
+              <div class="sim-pa-arrow">paged read ▶</div>
+              <div class="sim-pa-node">block_table</div>
+              <div class="sim-pa-arrow">▶</div>
+              <div class="sim-pa-node">历史 K/V</div>
+            </div>
+          </div>
+        </div>
+        <div class="sim-status">
+          <strong data-sim-title>初始状态</strong>
+          <span data-sim-progress>0 / 5</span>
+          <p data-sim-text>点击下一步，对比写路径和读路径如何协作完成一次 Attention。</p>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -730,6 +772,7 @@ def forward(self, query, key, value):
       </div>
     </section>
   </main>
+  <script src="../../assets/js/animation-engine.js"></script>
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

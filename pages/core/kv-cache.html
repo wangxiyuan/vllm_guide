@@ -19,7 +19,7 @@
     <section class="topic-hero panel">
       <div class="card-meta"><span>core</span><span>intermediate</span><span class="status">ready</span><span>15 min</span></div>
       <h1>KV Cache</h1>
-      <p class="hero-text">GPU 显存分页管理、前缀复用与驱逐策略</p>
+      <p class="hero-text">GPU 显存分页管理、<span data-term="prefix caching" data-tip="相同 prompt 前缀的 KV block 只计算和保存一次，后续请求直接复用。">前缀复用</span>与驱逐策略</p>
       <div class="tags"><span class="tag">KV Cache</span><span class="tag">Block</span><span class="tag">Prefix Caching</span></div>
     </section>
 
@@ -70,6 +70,30 @@
       </div>
 
       <p>核心思路：<strong>分页</strong>（把 KV 向量按 block_size 分块管理）+ <strong>共享</strong>（相同前缀的 block 只存一份）+ <strong>驱逐</strong>（显存不够时淘汰最久没用的 block）。</p>
+
+      <div class="interactive-sim panel" data-sim="kv-cache">
+        <div class="sim-head">
+          <div>
+            <p class="eyebrow">Interactive Simulation</p>
+            <h3>模拟 Block 分配与释放</h3>
+            <p class="muted">观察 block 如何在 free → used → cached → free 之间流转。前缀相同的 block 可以共享。</p>
+          </div>
+          <div class="sim-controls">
+            <button type="button" data-sim-prev disabled>上一步</button>
+            <button type="button" data-sim-next>下一步</button>
+            <button type="button" data-sim-reset>重置</button>
+          </div>
+        </div>
+        <div class="sim-board sim-kv-board">
+          <div class="sim-kv-pool" id="sim-kv-pool"></div>
+          <div class="sim-kv-tables" id="sim-kv-tables"></div>
+        </div>
+        <div class="sim-status">
+          <strong data-sim-title>初始状态</strong>
+          <span data-sim-progress>0 / 6</span>
+          <p data-sim-text>8 个空闲 block。点击下一步开始模拟。</p>
+        </div>
+      </div>
 
       <h3>Block 里到底存了什么？</h3>
       <p>每个 block 是一块固定大小的 GPU 显存，存放 <code>block_size</code>（默认 16）个 token 的 <strong>Key 和 Value 向量</strong>。以 Llama-2-7B 为例（32 个 KV head，每个 head 128 维），一个 block 的形状是：</p>
@@ -479,6 +503,7 @@ block.reset_hash()  # 清除标记</code></pre>
       <code class="step-ref">vllm/config/cache.py</code>
     </section>
   </main>
+  <script src="../../assets/js/animation-engine.js"></script>
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

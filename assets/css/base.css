@@ -12,6 +12,7 @@
   --orange: #fb923c;
   --yellow: #facc15;
   --red: #f87171;
+  --mono: Consolas, Menlo, Monaco, "Courier New", monospace;
 }
 
 * { box-sizing: border-box; }
