@@ -26,16 +26,16 @@
       <h2>1. 本地预览</h2>
       <p>本站点是纯静态站点，所有数据已内联到 <code>assets/js/site-data.js</code>，无需任何服务进程。</p>
       <ul class="checklist">
-        <li>直接双击 <code>guide/index.html</code> 即可在浏览器中查看。</li>
-        <li>也可部署到 GitHub Pages 等静态托管：把 <code>guide/</code> 推送到仓库的 Pages 分支或子目录即可。</li>
-        <li>可选：本地仍可起 <code>python -m http.server</code>，但不是必须。</li>
+        <li>直接双击 <code>index.html</code> 即可在浏览器中查看。</li>
+        <li>也可部署到 GitHub Pages 等静态托管：把项目目录推送到仓库的 Pages 分支或子目录即可。</li>
+        <li>可选：本地仍可起 <code>python -m http.server 8000 --directory .</code>，但不是必须。</li>
       </ul>
     </section>
 
     <section class="panel">
       <h2>2. 数据更新</h2>
       <p>真实数据保存在 <code>assets/data/*.json</code>。修改后请运行以下脚本重新生成 <code>assets/js/site-data.js</code>：</p>
-      <pre><code>python guide/scripts/bundle-data.py</code></pre>
+      <pre><code>python scripts/bundle-data.py</code></pre>
       <p>该脚本会读取 <code>topics.json</code>、<code>learning-paths.json</code>、<code>code-map.json</code> 并写入 JS 全局变量 <code>window.SITE_DATA</code>。</p>
     </section>
 

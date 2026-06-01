@@ -9,7 +9,7 @@
 如果你愿意，也可以起一个本地服务：
 
 ```bash
-python -m http.server 8000 --directory guide
+python -m http.server 8000 --directory .
 ```
 
 ## 部署到 GitHub Pages
@@ -47,7 +47,7 @@ guide/
 数据的「单一信源」仍然是 `assets/data/*.json`。修改后请重新生成 `site-data.js`：
 
 ```bash
-python guide/scripts/bundle-data.py
+python scripts/bundle-data.py
 ```
 
 ## 新增专题
@@ -55,7 +55,7 @@ python guide/scripts/bundle-data.py
 1. 复制 `assets/templates/topic-page.html`，放入合适的 `pages/<分类>/` 子目录。
 2. 在 `assets/data/topics.json` 添加专题元信息。
 3. 在 `assets/data/code-map.json` 添加源码索引（可选）。
-4. 运行 `python guide/scripts/bundle-data.py` 刷新数据。
+4. 运行 `python scripts/bundle-data.py` 刷新数据。
 5. 在专题页填充内容，并把状态从 `todo / outline` 升级到 `draft / ready`。
 
 详细规则见 `pages/reference/contribution-guide.html`。
