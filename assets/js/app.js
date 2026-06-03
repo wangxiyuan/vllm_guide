@@ -2,6 +2,18 @@
   const body = document.body;
   body.dataset.builtAt = new Date().toISOString();
 
+  const mdToggle = document.getElementById("md-toggle");
+  const topicContent = document.getElementById("topic-content");
+  const mdView = document.getElementById("topic-md-view");
+  if (mdToggle && topicContent && mdView) {
+    mdToggle.addEventListener("click", () => {
+      const isActive = mdToggle.classList.toggle("is-active");
+      topicContent.hidden = isActive;
+      mdView.hidden = !isActive;
+      mdToggle.textContent = isActive ? "HTML" : "MD";
+    });
+  }
+
   const main = document.querySelector("main");
   if (main && !document.getElementById("back-to-top")) {
     const button = document.createElement("button");

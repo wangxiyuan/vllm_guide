@@ -12,498 +12,1047 @@
 <body data-page-id="kv-cache">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>core</span><span>/</span><span>KV Cache</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
       <div class="card-meta"><span>core</span><span>intermediate</span><span class="status">ready</span><span>15 min</span></div>
       <h1>KV Cache</h1>
-      <p class="hero-text">GPU 显存分页管理、<span data-term="prefix caching" data-tip="相同 prompt 前缀的 KV block 只计算和保存一次，后续请求直接复用。">前缀复用</span>与驱逐策略</p>
+      <p class="hero-text">GPU 显存分页管理、<span data-term="前缀复用" data-tip="相同 prompt 前缀的 KV block 只计算和保存一次，后续请求直接复用。">前缀复用</span>与驱逐策略</p>
       <div class="tags"><span class="tag">KV Cache</span><span class="tag">Block</span><span class="tag">Prefix Caching</span></div>
     </section>
 
+
+
     <section class="panel">
       <h2>心智模型</h2>
-      <p>想象你在图书馆管理书架。每本书（token 的 KV 向量）放在固定大小的书盒（block）里，书盒编号 0、1、2……。当新读者（请求）到来时，管理员（调度器）从空书盒堆里取书盒给他用；读者走了，书盒归还。如果两本书开头一样，后面的书盒可以<strong>共享</strong>——不用再存一份。</p>
-
-      <div class="diagram-container">
-        <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
-          <div class="diagram-title">KV Cache 分页管理</div>
-          <div class="kv-mental-model">
-            <div class="kv-gpu-memory">
-              <div class="kv-gpu-title">GPU 显存 = 一排书盒（Blocks）</div>
-              <div class="kv-blocks">
-                <div class="kv-block kv-block-used">B0</div>
-                <div class="kv-block kv-block-used">B1</div>
-                <div class="kv-block kv-block-cached">B2</div>
-                <div class="kv-block kv-block-free">B3</div>
-                <div class="kv-block kv-block-free">B4</div>
-                <div class="kv-block kv-block-cached">B5</div>
-                <div class="kv-block kv-block-free">B6</div>
-                <div class="kv-block kv-block-free">B7</div>
-              </div>
-            </div>
-            <div class="kv-legend">
-              <div class="kv-legend-item"><span class="kv-legend-dot kv-block-used"></span> 正在被某个请求使用</div>
-              <div class="kv-legend-item"><span class="kv-legend-dot kv-block-cached"></span> 空闲但内容有缓存标记，可被新请求复用</div>
-              <div class="kv-legend-item"><span class="kv-legend-dot kv-block-free"></span> 空闲，无缓存标记</div>
-            </div>
-            <div class="kv-data-structures">
-              <div class="kv-ds">
-                <div class="kv-ds-title">BlockPool</div>
-                <div class="kv-ds-items">
-                  <div class="kv-ds-item">空闲书盒队列（按最久未用排序）</div>
-                  <div class="kv-ds-item">缓存标记 → 书盒 的查找表</div>
-                </div>
-              </div>
-              <div class="kv-ds">
-                <div class="kv-ds-title">每个请求的 Block Table</div>
-                <div class="kv-ds-items">
-                  <div class="kv-ds-item">[B0, B1, B2, B5, ...]（逻辑顺序）</div>
-                  <div class="kv-ds-item">前缀相同的 block 可以被多个请求共享</div>
-                </div>
-              </div>
-            </div>
+      
+<p>想象你在图书馆管理书架。每本书（token 的 KV 向量）放在固定大小的书盒（block）里，书盒编号 0、1、2……。当新读者（请求）到来时，管理员（调度器）从空书盒堆里取书盒给他用；读者走了，书盒归还。如果两本书开头一样，后面的书盒可以<strong>共享</strong>——不用再存一份。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
+    <div class="diagram-title">KV Cache 分页管理</div>
+    <div class="kv-mental-model">
+      <div class="kv-gpu-memory">
+        <div class="kv-gpu-title">GPU 显存 = 一排书盒（Blocks）</div>
+        <div class="kv-blocks">
+          <div class="kv-block kv-block-used">B0</div>
+          <div class="kv-block kv-block-used">B1</div>
+          <div class="kv-block kv-block-cached">B2</div>
+          <div class="kv-block kv-block-free">B3</div>
+          <div class="kv-block kv-block-free">B4</div>
+          <div class="kv-block kv-block-cached">B5</div>
+          <div class="kv-block kv-block-free">B6</div>
+          <div class="kv-block kv-block-free">B7</div>
+        </div>
+      </div>
+      <div class="kv-legend">
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-used"></span> 正在被某个请求使用</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-cached"></span> 空闲但内容有缓存标记，可被新请求复用</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-free"></span> 空闲，无缓存标记</div>
+      </div>
+      <div class="kv-data-structures">
+        <div class="kv-ds">
+          <div class="kv-ds-title">BlockPool</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">空闲书盒队列（按最久未用排序）</div>
+            <div class="kv-ds-item">缓存标记 → 书盒 的查找表</div>
+          </div>
+        </div>
+        <div class="kv-ds">
+          <div class="kv-ds-title">每个请求的 Block Table</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">[B0, B1, B2, B5, ...]（逻辑顺序）</div>
+            <div class="kv-ds-item">前缀相同的 block 可以被多个请求共享</div>
           </div>
         </div>
       </div>
-
-      <p>核心思路：<strong>分页</strong>（把 KV 向量按 block_size 分块管理）+ <strong>共享</strong>（相同前缀的 block 只存一份）+ <strong>驱逐</strong>（显存不够时淘汰最久没用的 block）。</p>
-
-      <div class="interactive-sim panel" data-sim="kv-cache">
-        <div class="sim-head">
-          <div>
-            <p class="eyebrow">Interactive Simulation</p>
-            <h3>模拟 Block 分配与释放</h3>
-            <p class="muted">观察 block 如何在 free → used → cached → free 之间流转。前缀相同的 block 可以共享。</p>
-          </div>
-          <div class="sim-controls">
-            <button type="button" data-sim-prev disabled>上一步</button>
-            <button type="button" data-sim-next>下一步</button>
-            <button type="button" data-sim-reset>重置</button>
-          </div>
-        </div>
-        <div class="sim-board sim-kv-board">
-          <div class="sim-kv-pool" id="sim-kv-pool"></div>
-          <div class="sim-kv-tables" id="sim-kv-tables"></div>
-        </div>
-        <div class="sim-status">
-          <strong data-sim-title>初始状态</strong>
-          <span data-sim-progress>0 / 6</span>
-          <p data-sim-text>8 个空闲 block。点击下一步开始模拟。</p>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kv-mental-model"><p>KV Cache 分页管理示意图。GPU 显存被划分为一排固定大小的书盒（Blocks），编号 B0-B7。每个 block 有三种状态：正在使用（used，如 B0、B1）、缓存中（cached，如 B2、B5，空闲但带有缓存标记可被复用）、空闲（free，如 B3、B4、B6、B7，无缓存标记）。</p>
+<p>BlockPool 维护两个数据结构：空闲书盒队列（按最久未用排序）和缓存标记到书盒的查找表。每个请求有自己的 Block Table，记录逻辑顺序如 [B0, B1, B2, B5, ...]，前缀相同的 block 可以被多个请求共享。</p>
+<p>核心思路：分页（把 KV 向量按 block_size 分块管理）+ 共享（相同前缀的 block 只存一份）+ 驱逐（显存不够时淘汰最久没用的 block）。</p>
+</template>
+<p>核心思路：<strong>分页</strong>（把 KV 向量按 block_size 分块管理）+ <strong>共享</strong>（相同前缀的 block 只存一份）+ <strong>驱逐</strong>（显存不够时淘汰最久没用的 block）。</p>
+<h3>Block 里到底存了什么？</h3>
+<p>每个 block 是一块固定大小的 GPU 显存，存放 <code>block_size</code>（默认 16）个 token 的 <strong>Key 和 Value 向量</strong>。以 Llama-2-7B 为例（32 个 KV head，每个 head 128 维），一个 block 的形状是：</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/attention/backends/flash_attn.py">
+    <div class="diagram-title">单个 Block 的存储结构</div>
+    <div class="kv-tensor-layout">
+      <div class="kv-tensor-dim" data-dim="kv">
+        <div class="kv-tensor-dim-label">dim 0: K/V</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-k">K</div>
+          <div class="kv-tensor-cell kv-cell-v">V</div>
         </div>
       </div>
-
-      <h3>Block 里到底存了什么？</h3>
-      <p>每个 block 是一块固定大小的 GPU 显存，存放 <code>block_size</code>（默认 16）个 token 的 <strong>Key 和 Value 向量</strong>。以 Llama-2-7B 为例（32 个 KV head，每个 head 128 维），一个 block 的形状是：</p>
-
-      <div class="diagram-container">
-        <div class="diagram" data-ref="vllm/v1/attention/backends/flash_attn.py">
-          <div class="diagram-title">单个 Block 的存储结构</div>
-          <div class="kv-tensor-layout">
-            <div class="kv-tensor-dim" data-dim="kv">
-              <div class="kv-tensor-dim-label">dim 0: K/V</div>
-              <div class="kv-tensor-dim-cells">
-                <div class="kv-tensor-cell kv-cell-k">K</div>
-                <div class="kv-tensor-cell kv-cell-v">V</div>
-              </div>
-            </div>
-            <div class="kv-tensor-bracket">×</div>
-            <div class="kv-tensor-dim" data-dim="tokens">
-              <div class="kv-tensor-dim-label">dim 1: block_size = 16</div>
-              <div class="kv-tensor-dim-cells">
-                <div class="kv-tensor-cell">t₀</div>
-                <div class="kv-tensor-cell">t₁</div>
-                <div class="kv-tensor-cell">...</div>
-                <div class="kv-tensor-cell">t₁₅</div>
-              </div>
-            </div>
-            <div class="kv-tensor-bracket">×</div>
-            <div class="kv-tensor-dim" data-dim="heads">
-              <div class="kv-tensor-dim-label">dim 2: num_kv_heads = 32</div>
-              <div class="kv-tensor-dim-cells">
-                <div class="kv-tensor-cell kv-cell-head">h₀</div>
-                <div class="kv-tensor-cell kv-cell-head">h₁</div>
-                <div class="kv-tensor-cell kv-cell-head">...</div>
-                <div class="kv-tensor-cell kv-cell-head">h₃₁</div>
-              </div>
-            </div>
-            <div class="kv-tensor-bracket">×</div>
-            <div class="kv-tensor-dim" data-dim="dim">
-              <div class="kv-tensor-dim-label">dim 3: head_size = 128</div>
-              <div class="kv-tensor-dim-cells">
-                <div class="kv-tensor-cell kv-cell-dim">d₀</div>
-                <div class="kv-tensor-cell kv-cell-dim">d₁</div>
-                <div class="kv-tensor-cell kv-cell-dim">...</div>
-                <div class="kv-tensor-cell kv-cell-dim">d₁₂₇</div>
-              </div>
-            </div>
-          </div>
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="tokens">
+        <div class="kv-tensor-dim-label">dim 1: block_size = 16</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell">t₀</div>
+          <div class="kv-tensor-cell">t₁</div>
+          <div class="kv-tensor-cell">...</div>
+          <div class="kv-tensor-cell">t₁₅</div>
         </div>
       </div>
-
-      <p>完整的 KV cache 张量形状就是 <code>(num_blocks, 2, block_size, num_kv_heads, head_size)</code>。可以理解为：<strong>一排书盒，每个书盒分上下两层（K 和 V），每层放 16 个 token 的 32 个 head 各 128 维向量</strong>。</p>
-
-      <h3>NHD vs HND：两种物理排布</h3>
-      <p>上面的逻辑形状叫 <strong>NHD</strong>（N=block数, H=head数, D=维度），token 在 head 里面是连续的。另一种排布是 <strong>HND</strong>，把 head 维度挪到 token 前面，使得同一个 head 的所有 token 连续存放：</p>
-
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">排布</div>
-          <div class="config-cell">物理形状（去掉 num_blocks 维度）</div>
-          <div class="config-cell">谁连续</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><strong>NHD</strong>（默认）</div>
-          <div class="config-cell"><code>(2, 16, 32, 128)</code></div>
-          <div class="config-cell">同一个 token 的所有 head 连续</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><strong>HND</strong></div>
-          <div class="config-cell"><code>(2, 32, 16, 128)</code></div>
-          <div class="config-cell">同一个 head 的所有 token 连续</div>
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="heads">
+        <div class="kv-tensor-dim-label">dim 2: num_kv_heads = 32</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-head">h₀</div>
+          <div class="kv-tensor-cell kv-cell-head">h₁</div>
+          <div class="kv-tensor-cell kv-cell-head">...</div>
+          <div class="kv-tensor-cell kv-cell-head">h₃₁</div>
         </div>
       </div>
-
-      <p>HND 排布对某些 attention kernel 更友好（同一个 head 的 token 连续读取），可以通过 <code>VLLM_KV_CACHE_LAYOUT=HND</code> 开启。</p>
-
-      <h3>一个 Block 占多少显存？</h3>
-      <div class="code-block" data-ref="vllm/v1/kv_cache_interface.py">
-        <pre><code># 单个 block 的字节数 = 2 × block_size × num_kv_heads × head_size × dtype_size
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="dim">
+        <div class="kv-tensor-dim-label">dim 3: head_size = 128</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-dim">d₀</div>
+          <div class="kv-tensor-cell kv-cell-dim">d₁</div>
+          <div class="kv-tensor-cell kv-cell-dim">...</div>
+          <div class="kv-tensor-cell kv-cell-dim">d₁₂₇</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kv-tensor-layout"><p>单个 Block 的存储结构。一个 block 的张量形状为 (2, 16, 32, 128)，四个维度分别是：</p>
+<ul>
+<li>dim 0: K/V（2 层，分别存储 Key 和 Value）</li>
+<li>dim 1: block_size = 16（存储 16 个 token）</li>
+<li>dim 2: num_kv_heads = 32（32 个 KV head）</li>
+<li>dim 3: head_size = 128（每个 head 128 维）</li>
+</ul>
+<p>完整的 KV cache 张量形状是 (num_blocks, 2, block_size, num_kv_heads, head_size)。可以理解为：一排书盒，每个书盒分上下两层（K 和 V），每层放 16 个 token 的 32 个 head 各 128 维向量。</p>
+</template>
+<p>完整的 KV cache 张量形状就是 <code>(num_blocks, 2, block_size, num_kv_heads, head_size)</code>。可以理解为：<strong>一排书盒，每个书盒分上下两层（K 和 V），每层放 16 个 token 的 32 个 head 各 128 维向量</strong>。</p>
+<h3>NHD vs HND：两种物理排布</h3>
+<p>上面的逻辑形状叫 <strong>NHD</strong>（N=block数, H=head数, D=维度），token 在 head 里面是连续的。另一种排布是 <strong>HND</strong>，把 head 维度挪到 token 前面，使得同一个 head 的所有 token 连续存放：</p>
+<table>
+<thead>
+<tr>
+<th>排布</th>
+<th>物理形状（去掉 num_blocks 维度）</th>
+<th>谁连续</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NHD</strong>（默认）</td>
+<td><code>(2, 16, 32, 128)</code></td>
+<td>同一个 token 的所有 head 连续</td>
+</tr>
+<tr>
+<td><strong>HND</strong></td>
+<td><code>(2, 32, 16, 128)</code></td>
+<td>同一个 head 的所有 token 连续</td>
+</tr>
+</tbody>
+</table>
+<p>HND 排布对某些 attention kernel 更友好（同一个 head 的 token 连续读取），可以通过 <code>VLLM_KV_CACHE_LAYOUT=HND</code> 开启。</p>
+<h3>一个 Block 占多少显存？</h3>
+<pre><code class="language-python"># ref: vllm/v1/kv_cache_interface.py
+# 单个 block 的字节数 = 2 × block_size × num_kv_heads × head_size × dtype_size
 # 例：Llama-2-7B, fp16:
-# = 2 × 16 × 32 × 128 × 2 = 262,144 字节 = 256 KB/block</code></pre>
-      </div>
+# = 2 × 16 × 32 × 128 × 2 = 262,144 字节 = 256 KB/block
+</code></pre>
+
     </section>
+
+
 
     <section class="panel">
       <h2>Block 的三种状态</h2>
-      <p>每个 block 有一个<strong>引用计数</strong>（ref_cnt）和一个<strong>缓存标记</strong>（block_hash），组合出三种状态：</p>
+      
+<p>每个 block 有一个<strong>引用计数</strong>（ref_cnt）和一个<strong>缓存标记</strong>（block_hash），组合出三种状态：</p>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>ref_cnt</th>
+<th>block_hash</th>
+<th>大白话</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>正在使用</td>
+<td>> 0</td>
+<td>可能有</td>
+<td>有人在读这本书，不能动</td>
+</tr>
+<tr>
+<td>缓存中</td>
+<td>0</td>
+<td>有</td>
+<td>没人读了，但书还在架上有标签，新读者可以复用</td>
+</tr>
+<tr>
+<td>空闲</td>
+<td>0</td>
+<td>无</td>
+<td>空书盒，随时可以装新书</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键设计</strong>：请求释放 block 时，ref_cnt 降到 0，block 进入空闲队列，但<strong>不会清除缓存标记</strong>。这意味着后续请求仍能通过前缀匹配找到它。只有当这个 block 被分配给新请求装不同内容时，旧标记才会被清除（驱逐）。</p>
 
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">状态</div>
-          <div class="config-cell">ref_cnt</div>
-          <div class="config-cell">block_hash</div>
-          <div class="config-cell">大白话</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">正在使用</div>
-          <div class="config-cell">> 0</div>
-          <div class="config-cell">可能有</div>
-          <div class="config-cell">有人在读这本书，不能动</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">缓存中</div>
-          <div class="config-cell">0</div>
-          <div class="config-cell">有</div>
-          <div class="config-cell">没人读了，但书还在架上有标签，新读者可以复用</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">空闲</div>
-          <div class="config-cell">0</div>
-          <div class="config-cell">无</div>
-          <div class="config-cell">空书盒，随时可以装新书</div>
-        </div>
-      </div>
-
-      <p><strong>关键设计</strong>：请求释放 block 时，ref_cnt 降到 0，block 进入空闲队列，但<strong>不会清除缓存标记</strong>。这意味着后续请求仍能通过前缀匹配找到它。只有当这个 block 被分配给新请求装不同内容时，旧标记才会被清除（驱逐）。</p>
     </section>
+
+
 
     <section class="panel">
       <h2>Block Pool 四个核心操作</h2>
-
-      <h3>1. 分配：get_new_blocks</h3>
-      <p>从空闲队列头部（最久未用端）取 block，清除旧缓存标记，设 ref_cnt=1：</p>
-      <div class="code-block" data-ref="vllm/v1/core/block_pool.py">
-        <pre><code>ret = self.free_block_queue.popleft_n(num_blocks)  # 取最久未用的
+      
+<h3>1. 分配：get_new_blocks</h3>
+<p>从空闲队列头部（最久未用端）取 block，清除旧缓存标记，设 ref_cnt=1：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+ret = self.free_block_queue.popleft_n(num_blocks)  # 取最久未用的
 for block in ret:
     self._maybe_evict_cached_block(block)  # 清除旧缓存标记
-    block.ref_cnt += 1                      # 标记为"正在使用"</code></pre>
-      </div>
-
-      <h3>2. 释放：free_blocks</h3>
-      <p>ref_cnt 减 1。只有减到 0 的 block 才回到空闲队列尾部（最近释放端）：</p>
-      <div class="code-block" data-ref="vllm/v1/core/block_pool.py">
-        <pre><code>for block in blocks_list:
+    block.ref_cnt += 1                      # 标记为"正在使用"
+</code></pre>
+<h3>2. 释放：free_blocks</h3>
+<p>ref_cnt 减 1。只有减到 0 的 block 才回到空闲队列尾部（最近释放端）：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+for block in blocks_list:
     block.ref_cnt -= 1
 # 只有 ref_cnt==0 的 block 才归还空闲队列
 self.free_block_queue.append_n(
     [b for b in blocks_list if b.ref_cnt == 0 and not b.is_null]
-)</code></pre>
-      </div>
-
-      <h3>3. Touch：缓存命中时引用</h3>
-      <p>新请求发现前缀匹配时，对已有 block 的 ref_cnt 加 1，并从空闲队列中移除（防止被驱逐）：</p>
-      <div class="code-block" data-ref="vllm/v1/core/block_pool.py">
-        <pre><code>for block in blocks:
+)
+</code></pre>
+<h3>3. Touch：缓存命中时引用</h3>
+<p>新请求发现前缀匹配时，对已有 block 的 ref_cnt 加 1，并从空闲队列中移除（防止被驱逐）：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+for block in blocks:
     if block.ref_cnt == 0 and not block.is_null:
         self.free_block_queue.remove(block)  # 从空闲队列移除
-    block.ref_cnt += 1                       # 引用计数 +1</code></pre>
-      </div>
-
-      <h3>4. 驱逐：_maybe_evict_cached_block</h3>
-      <p>分配新 block 时，如果它还带着旧缓存标记，需要清除：</p>
-      <div class="code-block" data-ref="vllm/v1/core/block_pool.py">
-        <pre><code>if block.block_hash is None:
+    block.ref_cnt += 1                       # 引用计数 +1
+</code></pre>
+<h3>4. 驱逐：_maybe_evict_cached_block</h3>
+<p>分配新 block 时，如果它还带着旧缓存标记，需要清除：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+if block.block_hash is None:
     return False  # 没有缓存标记，不用驱逐
 self.cached_block_hash_to_block.pop(block_hash, block.block_id)
-block.reset_hash()  # 清除标记</code></pre>
-      </div>
+block.reset_hash()  # 清除标记
+</code></pre>
+
     </section>
+
+
 
     <section class="panel">
       <h2>LRU 驱逐策略</h2>
-      <p>空闲队列是一个<strong>双向链表</strong>（自定义实现，支持 O(1) 中间删除），按 LRU 排序：</p>
+      
+<p>空闲队列是一个<strong>双向链表</strong>（自定义实现，支持 O(1) 中间删除），按 LRU 排序：</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">空闲队列的 LRU 顺序</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">头部<br><small>最久未用<br>先被分配/驱逐</small></div>
+      <div class="kv-lc-arrow">← 更久 →</div>
+      <div class="kv-lc-state" data-state="cached-free">中间<br><small>较早释放</small></div>
+      <div class="kv-lc-arrow">← 更久 →</div>
+      <div class="kv-lc-state" data-state="free">尾部<br><small>最近释放<br>最后被驱逐</small></div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kv-lru-queue"><p>空闲队列的 LRU 顺序示意图。空闲队列是一个双向链表，按 LRU（最久未用）排序：</p>
+<ul>
+<li>头部：最久未用的 block，最先被分配或驱逐</li>
+<li>中间：较早释放的 block</li>
+<li>尾部：最近释放的 block，最后被驱逐</li>
+</ul>
+<p>驱逐顺序规则：</p>
+<ol>
+<li>最久未用的先驱逐：从队列头部取 block 分配，头部是最久没被 touch 的</li>
+<li>同一请求的尾部 block 先驱逐：释放时按逆序追加（尾部 block 包含更多 hash token，驱逐它对前缀链的破坏更小）</li>
+<li>Touch 保护：被 touch 的 block 从空闲队列中移除，不会被驱逐</li>
+</ol>
+</template>
+<h3>驱逐顺序规则</h3>
+<ul>
+<li><strong>最久未用的先驱逐</strong>：从队列头部取 block 分配，头部是最久没被 touch 的。</li>
+<li><strong>同一请求的尾部 block 先驱逐</strong>：释放时按逆序追加（尾部 block 包含更多 hash token，驱逐它对前缀链的破坏更小）。</li>
+<li><strong>Touch 保护</strong>：被 touch 的 block 从空闲队列中移除，不会被驱逐。</li>
+</ul>
 
-      <div class="diagram-container">
-        <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
-          <div class="diagram-title">空闲队列的 LRU 顺序</div>
-          <div class="kv-lifecycle">
-            <div class="kv-lc-state" data-state="free">头部<br><small>最久未用<br>先被分配/驱逐</small></div>
-            <div class="kv-lc-arrow">← 更久 →</div>
-            <div class="kv-lc-state" data-state="cached-free">中间<br><small>较早释放</small></div>
-            <div class="kv-lc-arrow">← 更久 →</div>
-            <div class="kv-lc-state" data-state="free">尾部<br><small>最近释放<br>最后被驱逐</small></div>
-          </div>
-        </div>
-      </div>
-
-      <h3>驱逐顺序规则</h3>
-      <ul>
-        <li><strong>最久未用的先驱逐</strong>：从队列头部取 block 分配，头部是最久没被 touch 的。</li>
-        <li><strong>同一请求的尾部 block 先驱逐</strong>：释放时按逆序追加（尾部 block 包含更多 hash token，驱逐它对前缀链的破坏更小）。</li>
-        <li><strong>Touch 保护</strong>：被 touch 的 block 从空闲队列中移除，不会被驱逐。</li>
-      </ul>
     </section>
+
+
 
     <section class="panel">
       <h2>Prefix Caching：前缀复用</h2>
-      <p>如果两个请求的开头一样（比如相同的 system prompt），后面的请求可以<strong>直接复用</strong>前面请求的 KV cache，跳过重复计算。</p>
-
-      <h3>链式哈希：怎么判断"开头一样"？</h3>
-      <p>每个 block 的哈希 = hash(前一个 block 的哈希, 本 block 的 token)。这形成一条<strong>哈希链</strong>：</p>
-
-      <div class="diagram-container">
-        <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
-          <div class="diagram-title">链式哈希结构</div>
-          <div class="kv-hash-chain">
-            <div class="kv-hash-block">
-              <div class="kv-hash-block-title">Block 0</div>
-              <div class="kv-hash-block-detail">hash₀ = H(种子, tokens[0:16])</div>
-            </div>
-            <div class="kv-hash-arrow">→</div>
-            <div class="kv-hash-block">
-              <div class="kv-hash-block-title">Block 1</div>
-              <div class="kv-hash-block-detail">hash₁ = H(hash₀, tokens[16:32])</div>
-            </div>
-            <div class="kv-hash-arrow">→</div>
-            <div class="kv-hash-block">
-              <div class="kv-hash-block-title">Block 2</div>
-              <div class="kv-hash-block-detail">hash₂ = H(hash₁, tokens[32:48])</div>
-            </div>
-            <div class="kv-hash-arrow">→</div>
-            <div class="kv-hash-block">
-              <div class="kv-hash-block-title">Block N</div>
-              <div class="kv-hash-block-detail">hashₙ = H(hashₙ₋₁, tokens[...])</div>
-            </div>
-          </div>
-        </div>
+      
+<p>如果两个请求的开头一样（比如相同的 system prompt），后面的请求可以<strong>直接复用</strong>前面请求的 KV cache，跳过重复计算。</p>
+<h3>链式哈希：怎么判断"开头一样"？</h3>
+<p>每个 block 的哈希 = hash(前一个 block 的哈希, 本 block 的 token)。这形成一条<strong>哈希链</strong>：</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">链式哈希结构</div>
+    <div class="kv-hash-chain">
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 0</div>
+        <div class="kv-hash-block-detail">hash₀ = H(种子, tokens[0:16])</div>
       </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 1</div>
+        <div class="kv-hash-block-detail">hash₁ = H(hash₀, tokens[16:32])</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 2</div>
+        <div class="kv-hash-block-detail">hash₂ = H(hash₁, tokens[32:48])</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block N</div>
+        <div class="kv-hash-block-detail">hashₙ = H(hashₙ₋₁, tokens[...])</div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kv-hash-chain"><p>链式哈希结构示意图。每个 block 的哈希值依赖前一个 block 的哈希值和本 block 的 token：</p>
+<ul>
+<li>Block 0: hash₀ = H(种子, tokens[0:16])</li>
+<li>Block 1: hash₁ = H(hash₀, tokens[16:32])</li>
+<li>Block 2: hash₂ = H(hash₁, tokens[32:48])</li>
+<li>Block N: hashₙ = H(hashₙ₋₁, tokens[...])</li>
+</ul>
+<p>因为每个哈希依赖前面的哈希，所以如果 Block 3 命中，那 Block 0-2 一定也命中（向下封闭）。查找时从左到右扫描，遇到第一个未命中就停。</p>
+<p>除了 token 本身，哈希还会包含：多模态特征、LoRA 名称、cache salt 等，确保不同上下文不会错误命中。</p>
+</template>
+<p>因为每个哈希依赖前面的哈希，所以<strong>如果 Block 3 命中，那 Block 0-2 一定也命中</strong>（向下封闭）。查找时从左到右扫描，遇到第一个未命中就停。</p>
+<h3>什么会影响哈希？</h3>
+<p>除了 token 本身，哈希还会包含：多模态特征、LoRA 名称、cache salt 等，确保不同上下文不会错误命中。</p>
 
-      <p>因为每个哈希依赖前面的哈希，所以<strong>如果 Block 3 命中，那 Block 0-2 一定也命中</strong>（向下封闭）。查找时从左到右扫描，遇到第一个未命中就停。</p>
-
-      <h3>什么会影响哈希？</h3>
-      <p>除了 token 本身，哈希还会包含：多模态特征、LoRA 名称、cache salt 等，确保不同上下文不会错误命中。</p>
     </section>
+
+
 
     <section class="panel">
       <h2>共享 Block 的完整流程</h2>
-      <p>多个请求可以引用同一个 block。只有当<strong>所有引用都释放</strong>后，block 才能被驱逐。</p>
+      
+<p>多个请求可以引用同一个 block。只有当<strong>所有引用都释放</strong>后，block 才能被驱逐。</p>
+<pre class="diagram-raw"><div class="cache-flow">
+  <div class="cache-step" data-step="1">
+    <div class="cache-step-num">1</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 A 计算了前 10 个 block</div>
+      <div class="cache-step-desc">每个 block 设置缓存标记（hash），ref_cnt = 1</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="2">
+    <div class="cache-step-num">2</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 B 到来，前缀和 A 一样</div>
+      <div class="cache-step-desc">find_longest_cache_hit 找到 A 的 10 个 block，touch() 把 ref_cnt 加到 2</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="3">
+    <div class="cache-step-num">3</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">A 和 B 共享这 10 个 block</div>
+      <div class="cache-step-desc">ref_cnt=2，block 不会进入空闲队列，不会被驱逐</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="4">
+    <div class="cache-step-num">4</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 A 完成，释放 block</div>
+      <div class="cache-step-desc">ref_cnt 从 2 降到 1，block 不回空闲队列（B 还在用），缓存标记保留</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="cache-flow-html"><p>共享 Block 的完整流程，展示多个请求如何共享同一个 block：</p>
+<p>步骤 1：请求 A 计算了前 10 个 block，每个 block 设置缓存标记（hash），ref_cnt = 1。</p>
+<p>步骤 2：请求 B 到来，前缀和 A 一样。find_longest_cache_hit 找到 A 的 10 个 block，touch() 把 ref_cnt 加到 2。</p>
+<p>步骤 3：A 和 B 共享这 10 个 block。ref_cnt=2，block 不会进入空闲队列，不会被驱逐。</p>
+<p>步骤 4：请求 A 完成，释放 block。ref_cnt 从 2 降到 1，block 不回空闲队列（B 还在用），缓存标记保留。</p>
+<p>只有当所有引用都释放后（ref_cnt 降到 0），block 才能被驱逐。</p>
+</template>
 
-      <div class="cache-flow">
-        <div class="cache-step" data-step="1">
-          <div class="cache-step-num">1</div>
-          <div class="cache-step-content">
-            <div class="cache-step-title">请求 A 计算了前 10 个 block</div>
-            <div class="cache-step-desc">每个 block 设置缓存标记（hash），ref_cnt = 1</div>
-          </div>
-        </div>
-        <div class="cache-step" data-step="2">
-          <div class="cache-step-num">2</div>
-          <div class="cache-step-content">
-            <div class="cache-step-title">请求 B 到来，前缀和 A 一样</div>
-            <div class="cache-step-desc">find_longest_cache_hit 找到 A 的 10 个 block，touch() 把 ref_cnt 加到 2</div>
-          </div>
-        </div>
-        <div class="cache-step" data-step="3">
-          <div class="cache-step-num">3</div>
-          <div class="cache-step-content">
-            <div class="cache-step-title">A 和 B 共享这 10 个 block</div>
-            <div class="cache-step-desc">ref_cnt=2，block 不会进入空闲队列，不会被驱逐</div>
-          </div>
-        </div>
-        <div class="cache-step" data-step="4">
-          <div class="cache-step-num">4</div>
-          <div class="cache-step-content">
-            <div class="cache-step-title">请求 A 完成，释放 block</div>
-            <div class="cache-step-desc">ref_cnt 从 2 降到 1，block 不回空闲队列（B 还在用），缓存标记保留</div>
-          </div>
-        </div>
-      </div>
     </section>
+
+
 
     <section class="panel">
       <h2>Block 生命周期</h2>
-      <div class="diagram-container">
-        <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
-          <div class="diagram-title">Block 从分配到驱逐的完整路径</div>
-          <div class="kv-lifecycle">
-            <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
-            <div class="kv-lc-arrow">分配</div>
-            <div class="kv-lc-state" data-state="used">In Use<br><small>正在使用</small></div>
-            <div class="kv-lc-arrow">计算完成，写入缓存标记</div>
-            <div class="kv-lc-state" data-state="cached-used">Cached + In Use<br><small>有标记，正在使用</small></div>
-            <div class="kv-lc-arrow">请求释放</div>
-            <div class="kv-lc-state" data-state="cached-free">Cached + Free<br><small>有标记，空闲（可被新请求复用）</small></div>
-            <div class="kv-lc-arrow">被分配给新请求（驱逐旧标记）</div>
-            <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
-          </div>
-        </div>
-      </div>
+      
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
+    <div class="diagram-title">Block 从分配到驱逐的完整路径</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
+      <div class="kv-lc-arrow">分配</div>
+      <div class="kv-lc-state" data-state="used">In Use<br><small>正在使用</small></div>
+      <div class="kv-lc-arrow">计算完成，写入缓存标记</div>
+      <div class="kv-lc-state" data-state="cached-used">Cached + In Use<br><small>有标记，正在使用</small></div>
+      <div class="kv-lc-arrow">请求释放</div>
+      <div class="kv-lc-state" data-state="cached-free">Cached + Free<br><small>有标记，空闲（可被新请求复用）</small></div>
+      <div class="kv-lc-arrow">被分配给新请求（驱逐旧标记）</div>
+      <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kv-lifecycle"><p>Block 生命周期示意图，展示 block 从分配到驱逐的完整路径：</p>
+<ol>
+<li>Free（空闲，无标记）→ 分配 → In Use（正在使用）</li>
+<li>In Use → 计算完成，写入缓存标记 → Cached + In Use（有标记，正在使用）</li>
+<li>Cached + In Use → 请求释放 → Cached + Free（有标记，空闲，可被新请求复用）</li>
+<li>Cached + Free → 被分配给新请求（驱逐旧标记）→ Free（空闲，无标记）</li>
+</ol>
+<p>注意 "Cached + Free" 状态：block 虽然空闲，但因为还带着缓存标记，新请求如果前缀匹配可以直接 touch 复用，不用重新计算。只有当显存紧张、这个 block 被分配给其他请求时，旧标记才被清除。</p>
+</template>
+<p>注意 "Cached + Free" 状态：block 虽然空闲，但因为还带着缓存标记，新请求如果前缀匹配可以直接 touch 复用，不用重新计算。只有当显存紧张、这个 block 被分配给其他请求时，旧标记才被清除。</p>
 
-      <p>注意 "Cached + Free" 状态：block 虽然空闲，但因为还带着缓存标记，新请求如果前缀匹配可以直接 touch 复用，不用重新计算。只有当显存紧张、这个 block 被分配给其他请求时，旧标记才被清除。</p>
     </section>
+
+
 
     <section class="panel">
       <h2>allocate_slots：分配的全过程</h2>
-      <p>当调度器决定调度一个请求时，调用 <code>allocate_slots()</code> 为它分配 KV cache 空间。分三步：</p>
+      
+<p>当调度器决定调度一个请求时，调用 <code>allocate_slots()</code> 为它分配 KV cache 空间。分三步：</p>
+<h3>Block 布局</h3>
+<pre><code class="language-python"># ref: vllm/v1/core/kv_cache_manager.py
+# | 已计算 | 新命中本地缓存 | 外部缓存 | 待计算 | 投机解码预留 |
+# | comp  |   new_comp    | ext_comp |  new  |   lookahead   |
+</code></pre>
+<h3>三步流程</h3>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>做什么</th>
+<th>如果失败</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. 检查容量</td>
+<td>释放滑动窗口外不需要的 block，计算还需要多少新 block，和空闲数比较</td>
+<td>返回 None → 调度器触发抢占</td>
+</tr>
+<tr>
+<td>2. 处理前缀命中</td>
+<td>touch 本地缓存命中的 block（ref_cnt++），分配外部缓存 token 的新 block</td>
+<td>—</td>
+</tr>
+<tr>
+<td>3. 分配新 block</td>
+<td>从空闲队列分配新 block，写入缓存标记</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
 
-      <h3>Block 布局</h3>
-      <div class="code-block" data-ref="vllm/v1/core/kv_cache_manager.py">
-        <pre><code># | 已计算 | 新命中本地缓存 | 外部缓存 | 待计算 | 投机解码预留 |
-# | comp  |   new_comp    | ext_comp |  new  |   lookahead   |</code></pre>
-      </div>
-
-      <h3>三步流程</h3>
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">步骤</div>
-          <div class="config-cell">做什么</div>
-          <div class="config-cell">如果失败</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">1. 检查容量</div>
-          <div class="config-cell">释放滑动窗口外不需要的 block，计算还需要多少新 block，和空闲数比较</div>
-          <div class="config-cell">返回 None → 调度器触发抢占</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">2. 处理前缀命中</div>
-          <div class="config-cell">touch 本地缓存命中的 block（ref_cnt++），分配外部缓存 token 的新 block</div>
-          <div class="config-cell">—</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">3. 分配新 block</div>
-          <div class="config-cell">从空闲队列分配新 block，写入缓存标记</div>
-          <div class="config-cell">—</div>
-        </div>
-      </div>
     </section>
+
+
 
     <section class="panel">
       <h2>与 Scheduler 的交互</h2>
-      <p>调度器和 KV cache 的交互很简单，只有三个入口：</p>
+      
+<p>调度器和 KV cache 的交互很简单，只有三个入口：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>操作</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>新请求调度</td>
+<td><code>get_computed_blocks()</code> → <code>allocate_slots()</code></td>
+<td>先查前缀命中，再分配新 block</td>
+</tr>
+<tr>
+<td>已运行请求</td>
+<td><code>allocate_slots()</code></td>
+<td>直接分配新 block（decode 每步只需 1 个新 token）</td>
+</tr>
+<tr>
+<td>抢占/完成</td>
+<td><code>free()</code></td>
+<td>释放所有 block，ref_cnt 降为 0</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/core/sched/scheduler.py</code></p>
 
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">场景</div>
-          <div class="config-cell">操作</div>
-          <div class="config-cell">说明</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">新请求调度</div>
-          <div class="config-cell"><code>get_computed_blocks()</code> → <code>allocate_slots()</code></div>
-          <div class="config-cell">先查前缀命中，再分配新 block</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">已运行请求</div>
-          <div class="config-cell"><code>allocate_slots()</code></div>
-          <div class="config-cell">直接分配新 block（decode 每步只需 1 个新 token）</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">抢占/完成</div>
-          <div class="config-cell"><code>free()</code></div>
-          <div class="config-cell">释放所有 block，ref_cnt 降为 0</div>
-        </div>
-      </div>
-      <code class="step-ref">vllm/v1/core/sched/scheduler.py</code>
     </section>
+
+
 
     <section class="panel">
       <h2>混合模型：多种 Attention 共存</h2>
-      <p>有些模型同时有 Full Attention 和 Sliding Window Attention，它们的 block 大小和缓存策略不同。vLLM 把层按 attention 类型<strong>分组</strong>管理：</p>
+      
+<p>有些模型同时有 Full Attention 和 Sliding Window Attention，它们的 block 大小和缓存策略不同。vLLM 把层按 attention 类型<strong>分组</strong>管理：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>用的 Coordinator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>只有一种 attention</td>
+<td><code>UnitaryKVCacheCoordinator</code></td>
+</tr>
+<tr>
+<td>多种 attention（Full + SWA 等）</td>
+<td><code>HybridKVCacheCoordinator</code></td>
+</tr>
+<tr>
+<td>Prefix caching 禁用</td>
+<td><code>KVCacheCoordinatorNoPrefixCache</code></td>
+</tr>
+</tbody>
+</table>
+<p>混合模型的关键约束：缓存命中长度必须是所有 group block 大小的<strong>最小公倍数</strong>的倍数，哈希粒度是<strong>最大公约数</strong>。查找时用迭代法求各类型都能接受的最长命中长度。</p>
+<p><code>vllm/v1/core/kv_cache_coordinator.py</code></p>
 
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">场景</div>
-          <div class="config-cell">用的 Coordinator</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">只有一种 attention</div>
-          <div class="config-cell"><code>UnitaryKVCacheCoordinator</code></div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">多种 attention（Full + SWA 等）</div>
-          <div class="config-cell"><code>HybridKVCacheCoordinator</code></div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell">Prefix caching 禁用</div>
-          <div class="config-cell"><code>KVCacheCoordinatorNoPrefixCache</code></div>
-        </div>
-      </div>
-
-      <p>混合模型的关键约束：缓存命中长度必须是所有 group block 大小的<strong>最小公倍数</strong>的倍数，哈希粒度是<strong>最大公约数</strong>。查找时用迭代法求各类型都能接受的最长命中长度。</p>
-      <code class="step-ref">vllm/v1/core/kv_cache_coordinator.py</code>
     </section>
+
+
 
     <section class="panel">
       <h2>关键配置</h2>
-      <div class="config-table">
-        <div class="config-row config-header">
-          <div class="config-cell">配置项</div>
-          <div class="config-cell">默认值</div>
-          <div class="config-cell">说明</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><code>block_size</code></div>
-          <div class="config-cell">16</div>
-          <div class="config-cell">每个 block 存几个 token 的 KV</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><code>gpu_memory_utilization</code></div>
-          <div class="config-cell">0.92</div>
-          <div class="config-cell">GPU 显存中 KV cache 占比</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><code>enable_prefix_caching</code></div>
-          <div class="config-cell">True</div>
-          <div class="config-cell">是否启用前缀复用</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><code>prefix_caching_hash_algo</code></div>
-          <div class="config-cell">"sha256"</div>
-          <div class="config-cell">哈希算法</div>
-        </div>
-        <div class="config-row">
-          <div class="config-cell"><code>hash_block_size</code></div>
-          <div class="config-cell">None (= block_size)</div>
-          <div class="config-cell">哈希粒度，混合模型时自动取 GCD</div>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>block_size</code></td>
+<td>16</td>
+<td>每个 block 存几个 token 的 KV</td>
+</tr>
+<tr>
+<td><code>gpu_memory_utilization</code></td>
+<td>0.92</td>
+<td>GPU 显存中 KV cache 占比</td>
+</tr>
+<tr>
+<td><code>enable_prefix_caching</code></td>
+<td>True</td>
+<td>是否启用前缀复用</td>
+</tr>
+<tr>
+<td><code>prefix_caching_hash_algo</code></td>
+<td>"sha256"</td>
+<td>哈希算法</td>
+</tr>
+<tr>
+<td><code>hash_block_size</code></td>
+<td>None (= block_size)</td>
+<td>哈希粒度，混合模型时自动取 GCD</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/cache.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象你在图书馆管理书架。每本书（token 的 KV 向量）放在固定大小的书盒（block）里，书盒编号 0、1、2……。当新读者（请求）到来时，管理员（调度器）从空书盒堆里取书盒给他用；读者走了，书盒归还。如果两本书开头一样，后面的书盒可以<strong>共享</strong>——不用再存一份。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
+    <div class="diagram-title">KV Cache 分页管理</div>
+    <div class="kv-mental-model">
+      <div class="kv-gpu-memory">
+        <div class="kv-gpu-title">GPU 显存 = 一排书盒（Blocks）</div>
+        <div class="kv-blocks">
+          <div class="kv-block kv-block-used">B0</div>
+          <div class="kv-block kv-block-used">B1</div>
+          <div class="kv-block kv-block-cached">B2</div>
+          <div class="kv-block kv-block-free">B3</div>
+          <div class="kv-block kv-block-free">B4</div>
+          <div class="kv-block kv-block-cached">B5</div>
+          <div class="kv-block kv-block-free">B6</div>
+          <div class="kv-block kv-block-free">B7</div>
         </div>
       </div>
-      <code class="step-ref">vllm/config/cache.py</code>
-    </section>
+      <div class="kv-legend">
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-used"></span> 正在被某个请求使用</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-cached"></span> 空闲但内容有缓存标记，可被新请求复用</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-free"></span> 空闲，无缓存标记</div>
+      </div>
+      <div class="kv-data-structures">
+        <div class="kv-ds">
+          <div class="kv-ds-title">BlockPool</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">空闲书盒队列（按最久未用排序）</div>
+            <div class="kv-ds-item">缓存标记 → 书盒 的查找表</div>
+          </div>
+        </div>
+        <div class="kv-ds">
+          <div class="kv-ds-title">每个请求的 Block Table</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">[B0, B1, B2, B5, ...]（逻辑顺序）</div>
+            <div class="kv-ds-item">前缀相同的 block 可以被多个请求共享</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>KV Cache 分页管理示意图。GPU 显存被划分为一排固定大小的书盒（Blocks），编号 B0-B7。每个 block 有三种状态：正在使用（used，如 B0、B1）、缓存中（cached，如 B2、B5，空闲但带有缓存标记可被复用）、空闲（free，如 B3、B4、B6、B7，无缓存标记）。</p>
+<p>BlockPool 维护两个数据结构：空闲书盒队列（按最久未用排序）和缓存标记到书盒的查找表。每个请求有自己的 Block Table，记录逻辑顺序如 [B0, B1, B2, B5, ...]，前缀相同的 block 可以被多个请求共享。</p>
+<p>核心思路：分页（把 KV 向量按 block_size 分块管理）+ 共享（相同前缀的 block 只存一份）+ 驱逐（显存不够时淘汰最久没用的 block）。</p>
+<p>核心思路：<strong>分页</strong>（把 KV 向量按 block_size 分块管理）+ <strong>共享</strong>（相同前缀的 block 只存一份）+ <strong>驱逐</strong>（显存不够时淘汰最久没用的 block）。</p>
+<h3>Block 里到底存了什么？</h3>
+<p>每个 block 是一块固定大小的 GPU 显存，存放 <code>block_size</code>（默认 16）个 token 的 <strong>Key 和 Value 向量</strong>。以 Llama-2-7B 为例（32 个 KV head，每个 head 128 维），一个 block 的形状是：</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/attention/backends/flash_attn.py">
+    <div class="diagram-title">单个 Block 的存储结构</div>
+    <div class="kv-tensor-layout">
+      <div class="kv-tensor-dim" data-dim="kv">
+        <div class="kv-tensor-dim-label">dim 0: K/V</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-k">K</div>
+          <div class="kv-tensor-cell kv-cell-v">V</div>
+        </div>
+      </div>
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="tokens">
+        <div class="kv-tensor-dim-label">dim 1: block_size = 16</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell">t₀</div>
+          <div class="kv-tensor-cell">t₁</div>
+          <div class="kv-tensor-cell">...</div>
+          <div class="kv-tensor-cell">t₁₅</div>
+        </div>
+      </div>
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="heads">
+        <div class="kv-tensor-dim-label">dim 2: num_kv_heads = 32</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-head">h₀</div>
+          <div class="kv-tensor-cell kv-cell-head">h₁</div>
+          <div class="kv-tensor-cell kv-cell-head">...</div>
+          <div class="kv-tensor-cell kv-cell-head">h₃₁</div>
+        </div>
+      </div>
+      <div class="kv-tensor-bracket">×</div>
+      <div class="kv-tensor-dim" data-dim="dim">
+        <div class="kv-tensor-dim-label">dim 3: head_size = 128</div>
+        <div class="kv-tensor-dim-cells">
+          <div class="kv-tensor-cell kv-cell-dim">d₀</div>
+          <div class="kv-tensor-cell kv-cell-dim">d₁</div>
+          <div class="kv-tensor-cell kv-cell-dim">...</div>
+          <div class="kv-tensor-cell kv-cell-dim">d₁₂₇</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>单个 Block 的存储结构。一个 block 的张量形状为 (2, 16, 32, 128)，四个维度分别是：</p>
+<ul>
+<li>dim 0: K/V（2 层，分别存储 Key 和 Value）</li>
+<li>dim 1: block_size = 16（存储 16 个 token）</li>
+<li>dim 2: num_kv_heads = 32（32 个 KV head）</li>
+<li>dim 3: head_size = 128（每个 head 128 维）</li>
+</ul>
+<p>完整的 KV cache 张量形状是 (num_blocks, 2, block_size, num_kv_heads, head_size)。可以理解为：一排书盒，每个书盒分上下两层（K 和 V），每层放 16 个 token 的 32 个 head 各 128 维向量。</p>
+<p>完整的 KV cache 张量形状就是 <code>(num_blocks, 2, block_size, num_kv_heads, head_size)</code>。可以理解为：<strong>一排书盒，每个书盒分上下两层（K 和 V），每层放 16 个 token 的 32 个 head 各 128 维向量</strong>。</p>
+<h3>NHD vs HND：两种物理排布</h3>
+<p>上面的逻辑形状叫 <strong>NHD</strong>（N=block数, H=head数, D=维度），token 在 head 里面是连续的。另一种排布是 <strong>HND</strong>，把 head 维度挪到 token 前面，使得同一个 head 的所有 token 连续存放：</p>
+<table>
+<thead>
+<tr>
+<th>排布</th>
+<th>物理形状（去掉 num_blocks 维度）</th>
+<th>谁连续</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>NHD</strong>（默认）</td>
+<td><code>(2, 16, 32, 128)</code></td>
+<td>同一个 token 的所有 head 连续</td>
+</tr>
+<tr>
+<td><strong>HND</strong></td>
+<td><code>(2, 32, 16, 128)</code></td>
+<td>同一个 head 的所有 token 连续</td>
+</tr>
+</tbody>
+</table>
+<p>HND 排布对某些 attention kernel 更友好（同一个 head 的 token 连续读取），可以通过 <code>VLLM_KV_CACHE_LAYOUT=HND</code> 开启。</p>
+<h3>一个 Block 占多少显存？</h3>
+<pre><code class="language-python"># ref: vllm/v1/kv_cache_interface.py
+# 单个 block 的字节数 = 2 × block_size × num_kv_heads × head_size × dtype_size
+# 例：Llama-2-7B, fp16:
+# = 2 × 16 × 32 × 128 × 2 = 262,144 字节 = 256 KB/block
+</code></pre>
+<h2>Block 的三种状态</h2>
+<p>每个 block 有一个<strong>引用计数</strong>（ref_cnt）和一个<strong>缓存标记</strong>（block_hash），组合出三种状态：</p>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>ref_cnt</th>
+<th>block_hash</th>
+<th>大白话</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>正在使用</td>
+<td>> 0</td>
+<td>可能有</td>
+<td>有人在读这本书，不能动</td>
+</tr>
+<tr>
+<td>缓存中</td>
+<td>0</td>
+<td>有</td>
+<td>没人读了，但书还在架上有标签，新读者可以复用</td>
+</tr>
+<tr>
+<td>空闲</td>
+<td>0</td>
+<td>无</td>
+<td>空书盒，随时可以装新书</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键设计</strong>：请求释放 block 时，ref_cnt 降到 0，block 进入空闲队列，但<strong>不会清除缓存标记</strong>。这意味着后续请求仍能通过前缀匹配找到它。只有当这个 block 被分配给新请求装不同内容时，旧标记才会被清除（驱逐）。</p>
+<h2>Block Pool 四个核心操作</h2>
+<h3>1. 分配：get_new_blocks</h3>
+<p>从空闲队列头部（最久未用端）取 block，清除旧缓存标记，设 ref_cnt=1：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+ret = self.free_block_queue.popleft_n(num_blocks)  # 取最久未用的
+for block in ret:
+    self._maybe_evict_cached_block(block)  # 清除旧缓存标记
+    block.ref_cnt += 1                      # 标记为"正在使用"
+</code></pre>
+<h3>2. 释放：free_blocks</h3>
+<p>ref_cnt 减 1。只有减到 0 的 block 才回到空闲队列尾部（最近释放端）：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+for block in blocks_list:
+    block.ref_cnt -= 1
+# 只有 ref_cnt==0 的 block 才归还空闲队列
+self.free_block_queue.append_n(
+    [b for b in blocks_list if b.ref_cnt == 0 and not b.is_null]
+)
+</code></pre>
+<h3>3. Touch：缓存命中时引用</h3>
+<p>新请求发现前缀匹配时，对已有 block 的 ref_cnt 加 1，并从空闲队列中移除（防止被驱逐）：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+for block in blocks:
+    if block.ref_cnt == 0 and not block.is_null:
+        self.free_block_queue.remove(block)  # 从空闲队列移除
+    block.ref_cnt += 1                       # 引用计数 +1
+</code></pre>
+<h3>4. 驱逐：_maybe_evict_cached_block</h3>
+<p>分配新 block 时，如果它还带着旧缓存标记，需要清除：</p>
+<pre><code class="language-python"># ref: vllm/v1/core/block_pool.py
+if block.block_hash is None:
+    return False  # 没有缓存标记，不用驱逐
+self.cached_block_hash_to_block.pop(block_hash, block.block_id)
+block.reset_hash()  # 清除标记
+</code></pre>
+<h2>LRU 驱逐策略</h2>
+<p>空闲队列是一个<strong>双向链表</strong>（自定义实现，支持 O(1) 中间删除），按 LRU 排序：</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">空闲队列的 LRU 顺序</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">头部<br><small>最久未用<br>先被分配/驱逐</small></div>
+      <div class="kv-lc-arrow">← 更久 →</div>
+      <div class="kv-lc-state" data-state="cached-free">中间<br><small>较早释放</small></div>
+      <div class="kv-lc-arrow">← 更久 →</div>
+      <div class="kv-lc-state" data-state="free">尾部<br><small>最近释放<br>最后被驱逐</small></div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>空闲队列的 LRU 顺序示意图。空闲队列是一个双向链表，按 LRU（最久未用）排序：</p>
+<ul>
+<li>头部：最久未用的 block，最先被分配或驱逐</li>
+<li>中间：较早释放的 block</li>
+<li>尾部：最近释放的 block，最后被驱逐</li>
+</ul>
+<p>驱逐顺序规则：</p>
+<ol>
+<li>最久未用的先驱逐：从队列头部取 block 分配，头部是最久没被 touch 的</li>
+<li>同一请求的尾部 block 先驱逐：释放时按逆序追加（尾部 block 包含更多 hash token，驱逐它对前缀链的破坏更小）</li>
+<li>Touch 保护：被 touch 的 block 从空闲队列中移除，不会被驱逐</li>
+</ol>
+<h3>驱逐顺序规则</h3>
+<ul>
+<li><strong>最久未用的先驱逐</strong>：从队列头部取 block 分配，头部是最久没被 touch 的。</li>
+<li><strong>同一请求的尾部 block 先驱逐</strong>：释放时按逆序追加（尾部 block 包含更多 hash token，驱逐它对前缀链的破坏更小）。</li>
+<li><strong>Touch 保护</strong>：被 touch 的 block 从空闲队列中移除，不会被驱逐。</li>
+</ul>
+<h2>Prefix Caching：前缀复用</h2>
+<p>如果两个请求的开头一样（比如相同的 system prompt），后面的请求可以<strong>直接复用</strong>前面请求的 KV cache，跳过重复计算。</p>
+<h3>链式哈希：怎么判断"开头一样"？</h3>
+<p>每个 block 的哈希 = hash(前一个 block 的哈希, 本 block 的 token)。这形成一条<strong>哈希链</strong>：</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">链式哈希结构</div>
+    <div class="kv-hash-chain">
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 0</div>
+        <div class="kv-hash-block-detail">hash₀ = H(种子, tokens[0:16])</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 1</div>
+        <div class="kv-hash-block-detail">hash₁ = H(hash₀, tokens[16:32])</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block 2</div>
+        <div class="kv-hash-block-detail">hash₂ = H(hash₁, tokens[32:48])</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">Block N</div>
+        <div class="kv-hash-block-detail">hashₙ = H(hashₙ₋₁, tokens[...])</div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>链式哈希结构示意图。每个 block 的哈希值依赖前一个 block 的哈希值和本 block 的 token：</p>
+<ul>
+<li>Block 0: hash₀ = H(种子, tokens[0:16])</li>
+<li>Block 1: hash₁ = H(hash₀, tokens[16:32])</li>
+<li>Block 2: hash₂ = H(hash₁, tokens[32:48])</li>
+<li>Block N: hashₙ = H(hashₙ₋₁, tokens[...])</li>
+</ul>
+<p>因为每个哈希依赖前面的哈希，所以如果 Block 3 命中，那 Block 0-2 一定也命中（向下封闭）。查找时从左到右扫描，遇到第一个未命中就停。</p>
+<p>除了 token 本身，哈希还会包含：多模态特征、LoRA 名称、cache salt 等，确保不同上下文不会错误命中。</p>
+<p>因为每个哈希依赖前面的哈希，所以<strong>如果 Block 3 命中，那 Block 0-2 一定也命中</strong>（向下封闭）。查找时从左到右扫描，遇到第一个未命中就停。</p>
+<h3>什么会影响哈希？</h3>
+<p>除了 token 本身，哈希还会包含：多模态特征、LoRA 名称、cache salt 等，确保不同上下文不会错误命中。</p>
+<h2>共享 Block 的完整流程</h2>
+<p>多个请求可以引用同一个 block。只有当<strong>所有引用都释放</strong>后，block 才能被驱逐。</p>
+<pre><code class="language-html"><div class="cache-flow">
+  <div class="cache-step" data-step="1">
+    <div class="cache-step-num">1</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 A 计算了前 10 个 block</div>
+      <div class="cache-step-desc">每个 block 设置缓存标记（hash），ref_cnt = 1</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="2">
+    <div class="cache-step-num">2</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 B 到来，前缀和 A 一样</div>
+      <div class="cache-step-desc">find_longest_cache_hit 找到 A 的 10 个 block，touch() 把 ref_cnt 加到 2</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="3">
+    <div class="cache-step-num">3</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">A 和 B 共享这 10 个 block</div>
+      <div class="cache-step-desc">ref_cnt=2，block 不会进入空闲队列，不会被驱逐</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="4">
+    <div class="cache-step-num">4</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">请求 A 完成，释放 block</div>
+      <div class="cache-step-desc">ref_cnt 从 2 降到 1，block 不回空闲队列（B 还在用），缓存标记保留</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>共享 Block 的完整流程，展示多个请求如何共享同一个 block：</p>
+<p>步骤 1：请求 A 计算了前 10 个 block，每个 block 设置缓存标记（hash），ref_cnt = 1。</p>
+<p>步骤 2：请求 B 到来，前缀和 A 一样。find_longest_cache_hit 找到 A 的 10 个 block，touch() 把 ref_cnt 加到 2。</p>
+<p>步骤 3：A 和 B 共享这 10 个 block。ref_cnt=2，block 不会进入空闲队列，不会被驱逐。</p>
+<p>步骤 4：请求 A 完成，释放 block。ref_cnt 从 2 降到 1，block 不回空闲队列（B 还在用），缓存标记保留。</p>
+<p>只有当所有引用都释放后（ref_cnt 降到 0），block 才能被驱逐。</p>
+<h2>Block 生命周期</h2>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/block_pool.py">
+    <div class="diagram-title">Block 从分配到驱逐的完整路径</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
+      <div class="kv-lc-arrow">分配</div>
+      <div class="kv-lc-state" data-state="used">In Use<br><small>正在使用</small></div>
+      <div class="kv-lc-arrow">计算完成，写入缓存标记</div>
+      <div class="kv-lc-state" data-state="cached-used">Cached + In Use<br><small>有标记，正在使用</small></div>
+      <div class="kv-lc-arrow">请求释放</div>
+      <div class="kv-lc-state" data-state="cached-free">Cached + Free<br><small>有标记，空闲（可被新请求复用）</small></div>
+      <div class="kv-lc-arrow">被分配给新请求（驱逐旧标记）</div>
+      <div class="kv-lc-state" data-state="free">Free<br><small>空闲，无标记</small></div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Block 生命周期示意图，展示 block 从分配到驱逐的完整路径：</p>
+<ol>
+<li>Free（空闲，无标记）→ 分配 → In Use（正在使用）</li>
+<li>In Use → 计算完成，写入缓存标记 → Cached + In Use（有标记，正在使用）</li>
+<li>Cached + In Use → 请求释放 → Cached + Free（有标记，空闲，可被新请求复用）</li>
+<li>Cached + Free → 被分配给新请求（驱逐旧标记）→ Free（空闲，无标记）</li>
+</ol>
+<p>注意 "Cached + Free" 状态：block 虽然空闲，但因为还带着缓存标记，新请求如果前缀匹配可以直接 touch 复用，不用重新计算。只有当显存紧张、这个 block 被分配给其他请求时，旧标记才被清除。</p>
+<p>注意 "Cached + Free" 状态：block 虽然空闲，但因为还带着缓存标记，新请求如果前缀匹配可以直接 touch 复用，不用重新计算。只有当显存紧张、这个 block 被分配给其他请求时，旧标记才被清除。</p>
+<h2>allocate_slots：分配的全过程</h2>
+<p>当调度器决定调度一个请求时，调用 <code>allocate_slots()</code> 为它分配 KV cache 空间。分三步：</p>
+<h3>Block 布局</h3>
+<pre><code class="language-python"># ref: vllm/v1/core/kv_cache_manager.py
+# | 已计算 | 新命中本地缓存 | 外部缓存 | 待计算 | 投机解码预留 |
+# | comp  |   new_comp    | ext_comp |  new  |   lookahead   |
+</code></pre>
+<h3>三步流程</h3>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>做什么</th>
+<th>如果失败</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. 检查容量</td>
+<td>释放滑动窗口外不需要的 block，计算还需要多少新 block，和空闲数比较</td>
+<td>返回 None → 调度器触发抢占</td>
+</tr>
+<tr>
+<td>2. 处理前缀命中</td>
+<td>touch 本地缓存命中的 block（ref_cnt++），分配外部缓存 token 的新 block</td>
+<td>—</td>
+</tr>
+<tr>
+<td>3. 分配新 block</td>
+<td>从空闲队列分配新 block，写入缓存标记</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<h2>与 Scheduler 的交互</h2>
+<p>调度器和 KV cache 的交互很简单，只有三个入口：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>操作</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>新请求调度</td>
+<td><code>get_computed_blocks()</code> → <code>allocate_slots()</code></td>
+<td>先查前缀命中，再分配新 block</td>
+</tr>
+<tr>
+<td>已运行请求</td>
+<td><code>allocate_slots()</code></td>
+<td>直接分配新 block（decode 每步只需 1 个新 token）</td>
+</tr>
+<tr>
+<td>抢占/完成</td>
+<td><code>free()</code></td>
+<td>释放所有 block，ref_cnt 降为 0</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/core/sched/scheduler.py</code></p>
+<h2>混合模型：多种 Attention 共存</h2>
+<p>有些模型同时有 Full Attention 和 Sliding Window Attention，它们的 block 大小和缓存策略不同。vLLM 把层按 attention 类型<strong>分组</strong>管理：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>用的 Coordinator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>只有一种 attention</td>
+<td><code>UnitaryKVCacheCoordinator</code></td>
+</tr>
+<tr>
+<td>多种 attention（Full + SWA 等）</td>
+<td><code>HybridKVCacheCoordinator</code></td>
+</tr>
+<tr>
+<td>Prefix caching 禁用</td>
+<td><code>KVCacheCoordinatorNoPrefixCache</code></td>
+</tr>
+</tbody>
+</table>
+<p>混合模型的关键约束：缓存命中长度必须是所有 group block 大小的<strong>最小公倍数</strong>的倍数，哈希粒度是<strong>最大公约数</strong>。查找时用迭代法求各类型都能接受的最长命中长度。</p>
+<p><code>vllm/v1/core/kv_cache_coordinator.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>block_size</code></td>
+<td>16</td>
+<td>每个 block 存几个 token 的 KV</td>
+</tr>
+<tr>
+<td><code>gpu_memory_utilization</code></td>
+<td>0.92</td>
+<td>GPU 显存中 KV cache 占比</td>
+</tr>
+<tr>
+<td><code>enable_prefix_caching</code></td>
+<td>True</td>
+<td>是否启用前缀复用</td>
+</tr>
+<tr>
+<td><code>prefix_caching_hash_algo</code></td>
+<td>"sha256"</td>
+<td>哈希算法</td>
+</tr>
+<tr>
+<td><code>hash_block_size</code></td>
+<td>None (= block_size)</td>
+<td>哈希粒度，混合模型时自动取 GCD</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/cache.py</code></p>
+</div>
+    </div>
+
   </main>
-  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

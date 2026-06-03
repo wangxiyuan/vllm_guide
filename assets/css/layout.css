@@ -11,6 +11,22 @@
   backdrop-filter: blur(12px);
 }
 .brand { font-weight: 800; color: white; white-space: nowrap; }
+.md-toggle {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--mono);
+  cursor: pointer;
+  letter-spacing: .04em;
+  transition: all .15s;
+}
+.md-toggle:hover { border-color: var(--blue); color: var(--blue); }
+.md-toggle.is-active { background: var(--blue); color: #000; border-color: var(--blue); }
 .hero {
   min-height: 220px;
   display: grid;

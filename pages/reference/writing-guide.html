@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>writing-guide - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="writing-guide">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>reference</span><span>/</span><span>writing-guide</span></nav>
+
+    <div class="topic-content" id="topic-content">
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>reference</span><span>beginner</span><span class="status">todo</span><span>10 min</span></div>
+      <h1>writing-guide</h1>
+      <p class="hero-text"></p>
+      <div class="tags"></div>
+    </section>
+
+
+
+    <h1>内容编写指南</h1>
+<p>本文档说明如何在 <code>content/</code> 目录下编写 Markdown 内容文件，以及如何构建和验证。</p>
+
+
+
+
+    <section class="panel">
+      <h2>快速开始</h2>
+      
+<pre><code>1. 在 content/<分类>/ 下新建 .md 文件
+2. 按 frontmatter + body 格式填写内容
+3. python scripts/build.py <文件名>
+4. 浏览器打开 pages/<分类>/<文件名>.html 预览
+5. 确认后提交
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>目录结构</h2>
+      
+<pre><code>content/                  # 唯一信源（Markdown）
+├── core/                 # 核心运行链路
+├── distributed/          # 并行与通信
+├── decoding/             # 解码算法
+├── optimizations/        # 性能优化
+├── models/               # 模型结构
+└── reference/            # 术语表、指南
+
+pages/                    # 构建产物（HTML，不要手动编辑）
+├── core/
+├── distributed/
+└── ...
+
+scripts/build.py          # Markdown → HTML 构建脚本
+</code></pre>
+<p><strong>核心原则</strong>：<code>content/*.md</code> 是唯一信源，<code>pages/*.html</code> 是构建产物，每次 <code>build.py</code> 运行都会覆盖。不要手动编辑 HTML。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Frontmatter 规范</h2>
+      
+<p>每个 <code>.md</code> 文件必须以 YAML frontmatter 开头：</p>
+<pre><code class="language-yaml">---
+id: my-topic                 # 页面唯一标识，用于 data-page-id
+title: 我的专题               # 显示标题
+category: core               # 分类，必须和文件所在目录名一致！
+level: beginner              # beginner | intermediate | advanced
+status: draft                # todo | outline | draft | ready | advanced
+readingMinutes: 15           # 预估阅读时间
+tags:                        # 标签列表
+  - Tag1
+  - Tag2
+codeRefs:                    # 关键源码位置（首页卡片会引用）
+  - vllm/v1/engine/core.py:94
+  - vllm/v1/core/sched/scheduler.py:334
+heroText: 一句话描述页面内容，支持<span data-term="术语" data-tip="解释">术语</span>语法。
+---
+</code></pre>
+<h3>字段说明</h3>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>是</td>
+<td>全局唯一，kebab-case</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>是</td>
+<td>中文显示标题</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>是</td>
+<td><strong>必须和 <code>content/</code> 下的子目录名完全一致</strong>（如 <code>core</code>、<code>distributed</code>、<code>optimizations</code>）</td>
+</tr>
+<tr>
+<td><code>level</code></td>
+<td>是</td>
+<td>三选一</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>是</td>
+<td>五选一，反映内容完成度</td>
+</tr>
+<tr>
+<td><code>readingMinutes</code></td>
+<td>是</td>
+<td>整数</td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td>是</td>
+<td>列表，至少一个</td>
+</tr>
+<tr>
+<td><code>codeRefs</code></td>
+<td>否</td>
+<td>列表，源码路径:行号</td>
+</tr>
+<tr>
+<td><code>heroText</code></td>
+<td>否</td>
+<td>首页卡片副标题，支持 term 语法</td>
+</tr>
+</tbody>
+</table>
+<h3>category 命名规范</h3>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>category 值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>content/core/</code></td>
+<td><code>core</code></td>
+<td>架构、调度、通信等核心机制</td>
+</tr>
+<tr>
+<td><code>content/distributed/</code></td>
+<td><code>distributed</code></td>
+<td>TP/PP/DP/EP/CP 等并行策略</td>
+</tr>
+<tr>
+<td><code>content/decoding/</code></td>
+<td><code>decoding</code></td>
+<td>投机解码、采样等解码算法</td>
+</tr>
+<tr>
+<td><code>content/optimizations/</code></td>
+<td><code>optimizations</code></td>
+<td>KV cache、prefix caching、量化等</td>
+</tr>
+<tr>
+<td><code>content/models/</code></td>
+<td><code>models</code></td>
+<td>各模型结构专题</td>
+</tr>
+<tr>
+<td><code>content/reference/</code></td>
+<td><code>reference</code></td>
+<td>术语表、编写指南</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>常见错误</strong>：category 写成 <code>optimization</code>（单数），但目录是 <code>optimizations</code>（复数）。构建会输出到错误的目录。</p>
+</blockquote>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>正文结构</h2>
+      
+<p>每个页面按 <code>##</code> 二级标题分节。构建脚本会按 <code>
+    </section>
+
+
+
+    <section class="panel">
+      <h2></code> 自动拆分 section。推荐结构：</p>
+<pre><code class="language-markdown">## 心智模型
+
+用类比或简化模型帮读者建立直觉。
+
+## 核心机制
+
+详细解释核心实现。
+
+## 关键配置
+
+配置项汇总表。
+</code></pre>
+<h2>术语提示</h2>
+      
+<p>使用 <code><span data-term="显示文本" data-tip="tooltip 内容">显示文本</span></code> 语法，构建时转为带 hover 提示的 <code><span></code>：</p>
+<pre><code class="language-markdown"><span data-term="token budget" data-tip="调度器每一轮最多允许处理的新 token 数，是吞吐和延迟的核心控制阀。">token budget</span>
+</code></pre>
+<ul>
+<li>显示文本会同时作为 <code>data-term</code> 属性和页面显示文字</li>
+<li>tooltip 内容放在 <code>term:</code> 后面，直到右括号 <code>)</code> 结束</li>
+<li>tooltip 中不要包含右括号 <code>)</code></li>
+</ul>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>图表：双轨制（人看 HTML + Agent 看文字）</h2>
+      
+<p>图表是内容与呈现分离的核心场景。每个图表写两份：</p>
+<ol>
+<li><strong><code>:::diagram <id>-html</code></strong> — 原始 HTML+CSS，构建时原样嵌入页面（人看）</li>
+<li><strong><code>:::diagram-desc <id>-html</code></strong> — 纯文字 Markdown 描述，构建时渲染为隐藏的 <code><template></code> 元素（AI agent 读 Markdown 时看到）</li>
+</ol>
+<h3>关键规则：ID 必须一致</h3>
+<p><code>:::diagram</code> 和 <code>:::diagram-desc</code> 的 ID <strong>必须完全相同</strong>：</p>
+<pre><code class="language-markdown">✅ 正确：ID 一致
+<pre class="diagram-raw">&lt;div class="..."&gt;...&lt;/div&gt;</pre>
+
+<template class="diagram-desc" data-diagram-desc="my-topic-html"><p>系统包含三个进程：</p>
+<p><strong>API 服务进程</strong>：运行 HTTP API 服务，处理输入输出。</p>
+<p><strong>EngineCore 进程</strong>：核心推理引擎，包含调度器（Scheduler）和执行器（Executor）。</p>
+<p><strong>Worker 进程</strong>：执行 GPU 计算，返回模型输出。</p>
+<p>进程间通过 ZMQ 通信。</p>
+</template>
+
+❌ 错误：ID 不一致
+<pre class="diagram-raw"></pre>
+</code></pre>
+<h3>关键规则：每个图表 ID 必须唯一</h3>
+<p>同一页面如果有多个图表，每个必须用不同的 ID：</p>
+<pre><code class="language-markdown">✅ 正确：每个图表有唯一 ID
+<pre class="diagram-raw"></pre>
+<template class="diagram-desc" data-diagram-desc="kv-mental-model-html"><p>...</p>
+</template>
+
+<pre class="diagram-raw"></pre>
+<template class="diagram-desc" data-diagram-desc="kv-tensor-layout-html"><p>...</p>
+</template>
+
+❌ 错误：多个图表共用同一个 ID
+<div class="custom-block custom-block-diagram"><p>...</p>
+</div>
+<template class="diagram-desc" data-diagram-desc="kv-html"><p>...</p>
+</template>
+
+<div class="custom-block custom-block-diagram"><p>...</p>
+</div>
+<template class="diagram-desc" data-diagram-desc="kv-html"><p>...</p>
+</template>
+</code></pre>
+<h3>命名建议</h3>
+<p>ID 格式：<code><页面缩写>-<图表内容>-html</code></p>
+<table>
+<thead>
+<tr>
+<th>页面</th>
+<th>图表</th>
+<th>推荐ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>scheduler</td>
+<td>调度器心智模型</td>
+<td><code>sched-mental-model-html</code></td>
+</tr>
+<tr>
+<td>scheduler</td>
+<td>调度流程</td>
+<td><code>sched-flow-html</code></td>
+</tr>
+<tr>
+<td>kv-cache</td>
+<td>分页管理</td>
+<td><code>kv-mental-model-html</code></td>
+</tr>
+<tr>
+<td>kv-cache</td>
+<td>张量布局</td>
+<td><code>kv-tensor-layout-html</code></td>
+</tr>
+<tr>
+<td>paged-attention</td>
+<td>核心概念</td>
+<td><code>pa-mental-model-html</code></td>
+</tr>
+</tbody>
+</table>
+<h3>diagram 的 HTML 代码块</h3>
+<p><code>:::diagram</code> 内部用 ```html 代码块包裹 HTML：</p>
+<pre><code class="language-markdown"><pre class="diagram-raw">&lt;div class="my-diagram"&gt;
+  &lt;div class="my-box"&gt;内容&lt;/div&gt;
+&lt;/div&gt;</pre>
+</code></pre>
+<p>HTML 中的 CSS 类名需要在 <code>assets/css/components.css</code> 中定义对应样式。</p>
+<h3>diagram-desc 的内容</h3>
+<p><code>:::diagram-desc</code> 内部写纯 Markdown，描述图表传达的知识：</p>
+<pre><code class="language-markdown"><template class="diagram-desc" data-diagram-desc="my-topic-html"><p>系统包含三个进程：</p>
+<p><strong>API 服务进程</strong>：运行 HTTP API 服务，处理输入输出。</p>
+<p><strong>EngineCore 进程</strong>：核心推理引擎，包含调度器（Scheduler）和执行器（Executor）。</p>
+<p><strong>Worker 进程</strong>：执行 GPU 计算，返回模型输出。</p>
+<p>进程间通过 ZMQ 通信。</p>
+</template>
+</code></pre>
+<p>注意：<code>diagram-desc</code> 的内容会出现在 Markdown 视图（MD 按钮）中，所以不要和正文中的描述重复。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>步骤播放器</h2>
+      
+<p>用 <code>:::steps</code> 块定义可交互的步骤序列：</p>
+<pre><code class="language-markdown"><div class="step-player" id="my-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 2</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="my-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>第一步标题</h3>步骤描述文字，支持 <code>代码</code> 和 <strong>加粗</strong>。
+<code>vllm/v1/engine/core.py</code>        ← 源码引用，单独一行
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>第二步标题</h3>步骤描述文字。
+<code class="step-ref">vllm/v1/core/sched/scheduler.py</code>
+</div></div></div>
+</code></pre>
+<p>规则：</p>
+<ul>
+<li><code>id</code> 用于前端 JS 绑定，同一页面内唯一</li>
+<li>每个步骤以 <code>### N. 标题</code> 开头，N 是序号</li>
+<li>步骤体支持 Markdown 格式</li>
+<li>单独一行的 <code>`vllm/...`</code> 会渲染为代码引用样式（<code>code.step-ref</code>）</li>
+<li>构建时自动生成 step-player 控件 + step-list</li>
+</ul>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>配置表</h2>
+      
+<p>用标准 Markdown 表格：</p>
+<pre><code class="language-markdown">| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `max_num_seqs` | 128 | 最大并发请求数 |
+| `block_size` | 16 | 每个 block 存几个 token 的 KV |
+</code></pre>
+<p>四列表格也支持：</p>
+<pre><code class="language-markdown">| 场景 | 操作 | 如果失败 | 代码位置 |
+|------|------|----------|----------|
+| 新请求 | `allocate_slots()` | 返回 None | `scheduler.py` |
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>代码块</h2>
+      
+<p>标准 Markdown 围栏代码块，标注语言：</p>
+<pre><code class="language-markdown">```python
+def step(self):
+    scheduler_output = self.scheduler.schedule()
+    model_output = self.model_executor.execute_model(scheduler_output)
+    return self.scheduler.update_from_output(scheduler_output, model_output)
+```
+</code></pre>
+<p>可以在代码块前一行用普通文字标注源码位置，不用特殊语法。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>交互模拟</h2>
+      
+<p>交互模拟（<code>data-sim</code>）是纯 JS 驱动的 UI 组件，<strong>不在 Markdown 中声明</strong>。它由 <code>assets/js/app.js</code> 中的 <code>createSim()</code> 函数管理。</p>
+<p>如果页面需要交互模拟，需要同时：</p>
+<ol>
+<li>在 HTML 页面中放置 <code><div class="interactive-sim" data-sim="name"></code> 容器</li>
+<li>在 <code>app.js</code> 中编写模拟步骤数据和渲染函数</li>
+</ol>
+<p>目前这个流程无法通过 Markdown 自动生成，需要手动在构建后的 HTML 中添加。如果你需要交互模拟，请先写好其他内容，构建后单独处理模拟部分。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>构建与验证</h2>
+      
+<pre><code class="language-bash"># 构建全部
+python scripts/build.py
+
+# 构建单个页面
+python scripts/build.py scheduler
+
+# 监听文件变化自动构建（需要 pip install watchdog）
+python scripts/build.py --watch
+</code></pre>
+<p>验证清单：</p>
+<ol>
+<li>构建无报错</li>
+<li>浏览器打开 HTML，检查排版和图表</li>
+<li>点击 MD 按钮切换 Markdown 视图，确认文字正确、arch-html 块已过滤</li>
+<li>检查页面底部的 JS 控件（step-player 等）正常工作</li>
+<li>如果有交互模拟，确认模拟按钮可用</li>
+</ol>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>常见问题</h2>
+      
+<h3>Q: category 应该写什么？</h3>
+<p>A: 必须和 <code>content/</code> 下的子目录名<strong>完全一致</strong>。<code>content/core/</code> 下写 <code>category: core</code>，<code>content/optimizations/</code> 下写 <code>category: optimizations</code>。</p>
+<h3>Q: 图表应该用 HTML 还是 Markdown 画？</h3>
+<p>A: 强 UI 类型的图表（进程框图、流程图、状态机等）用 <code>:::diagram *-html</code> 保存原始 HTML。简单表格和列表用 Markdown。同时必须写 <code>:::diagram-desc</code> 给 AI agent 用。</p>
+<h3>Q: <code>:::diagram-desc</code> 和正文内容重复了怎么办？</h3>
+<p>A: 避免重复。如果正文已经有一段描述，<code>diagram-desc</code> 应该只补充图表特有的视觉信息（如"左侧是 API 进程，中间是 EngineCore，右侧是 Worker"），而不是重新写一遍所有知识。或者反过来，正文中省略描述，把完整描述放在 <code>diagram-desc</code> 里。</p>
+<h3>Q: 步骤中的源码引用怎么写？</h3>
+<p>A: 单独一行，用反引号包裹路径：<code>`vllm/v1/engine/core.py`</code>。构建脚本会自动识别以 <code>vllm/</code> 开头或包含 <code>/</code> 的单行 code，渲染为 <code><code class="step-ref"></code>。</p>
+<h3>Q: 怎么添加新的 CSS 样式？</h3>
+<p>A: 在 <code>assets/css/components.css</code> 中添加。<code>:::diagram *-html</code> 中的 HTML 可以使用任意 CSS 类名，只要在 <code>components.css</code> 中有对应样式即可。</p>
+<h3>Q: 旧页面路径变了怎么办？</h3>
+<p>A: 在 <code>pages/</code> 旧路径下放一个 HTML 重定向页：</p>
+<pre><code class="language-html"><!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0;url=../新分类/新文件名.html">
+  <title>旧标题 - vLLM Visual Guide</title>
+</head>
+<body>
+  <p>此页面已迁移至 <a href="../新分类/新文件名.html">新地址</a></p>
+</body>
+</html>
+</code></pre>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h1>内容编写指南</h1>
+<p>本文档说明如何在 <code>content/</code> 目录下编写 Markdown 内容文件，以及如何构建和验证。</p>
+<h2>快速开始</h2>
+<pre><code>1. 在 content/<分类>/ 下新建 .md 文件
+2. 按 frontmatter + body 格式填写内容
+3. python scripts/build.py <文件名>
+4. 浏览器打开 pages/<分类>/<文件名>.html 预览
+5. 确认后提交
+</code></pre>
+<h2>目录结构</h2>
+<pre><code>content/                  # 唯一信源（Markdown）
+├── core/                 # 核心运行链路
+├── distributed/          # 并行与通信
+├── decoding/             # 解码算法
+├── optimizations/        # 性能优化
+├── models/               # 模型结构
+└── reference/            # 术语表、指南
+
+pages/                    # 构建产物（HTML，不要手动编辑）
+├── core/
+├── distributed/
+└── ...
+
+scripts/build.py          # Markdown → HTML 构建脚本
+</code></pre>
+<p><strong>核心原则</strong>：<code>content/*.md</code> 是唯一信源，<code>pages/*.html</code> 是构建产物，每次 <code>build.py</code> 运行都会覆盖。不要手动编辑 HTML。</p>
+<h2>Frontmatter 规范</h2>
+<p>每个 <code>.md</code> 文件必须以 YAML frontmatter 开头：</p>
+<pre><code class="language-yaml">---
+id: my-topic                 # 页面唯一标识，用于 data-page-id
+title: 我的专题               # 显示标题
+category: core               # 分类，必须和文件所在目录名一致！
+level: beginner              # beginner | intermediate | advanced
+status: draft                # todo | outline | draft | ready | advanced
+readingMinutes: 15           # 预估阅读时间
+tags:                        # 标签列表
+  - Tag1
+  - Tag2
+codeRefs:                    # 关键源码位置（首页卡片会引用）
+  - vllm/v1/engine/core.py:94
+  - vllm/v1/core/sched/scheduler.py:334
+heroText: 一句话描述页面内容，支持<span data-term="术语" data-tip="解释">术语</span>语法。
+---
+</code></pre>
+<h3>字段说明</h3>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>是</td>
+<td>全局唯一，kebab-case</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>是</td>
+<td>中文显示标题</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>是</td>
+<td><strong>必须和 <code>content/</code> 下的子目录名完全一致</strong>（如 <code>core</code>、<code>distributed</code>、<code>optimizations</code>）</td>
+</tr>
+<tr>
+<td><code>level</code></td>
+<td>是</td>
+<td>三选一</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td>是</td>
+<td>五选一，反映内容完成度</td>
+</tr>
+<tr>
+<td><code>readingMinutes</code></td>
+<td>是</td>
+<td>整数</td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td>是</td>
+<td>列表，至少一个</td>
+</tr>
+<tr>
+<td><code>codeRefs</code></td>
+<td>否</td>
+<td>列表，源码路径:行号</td>
+</tr>
+<tr>
+<td><code>heroText</code></td>
+<td>否</td>
+<td>首页卡片副标题，支持 term 语法</td>
+</tr>
+</tbody>
+</table>
+<h3>category 命名规范</h3>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>category 值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>content/core/</code></td>
+<td><code>core</code></td>
+<td>架构、调度、通信等核心机制</td>
+</tr>
+<tr>
+<td><code>content/distributed/</code></td>
+<td><code>distributed</code></td>
+<td>TP/PP/DP/EP/CP 等并行策略</td>
+</tr>
+<tr>
+<td><code>content/decoding/</code></td>
+<td><code>decoding</code></td>
+<td>投机解码、采样等解码算法</td>
+</tr>
+<tr>
+<td><code>content/optimizations/</code></td>
+<td><code>optimizations</code></td>
+<td>KV cache、prefix caching、量化等</td>
+</tr>
+<tr>
+<td><code>content/models/</code></td>
+<td><code>models</code></td>
+<td>各模型结构专题</td>
+</tr>
+<tr>
+<td><code>content/reference/</code></td>
+<td><code>reference</code></td>
+<td>术语表、编写指南</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>常见错误</strong>：category 写成 <code>optimization</code>（单数），但目录是 <code>optimizations</code>（复数）。构建会输出到错误的目录。</p>
+</blockquote>
+<h2>正文结构</h2>
+<p>每个页面按 <code>##</code> 二级标题分节。构建脚本会按 <code><h2></code> 自动拆分 section。推荐结构：</p>
+<pre><code class="language-markdown">## 心智模型
+
+用类比或简化模型帮读者建立直觉。
+
+## 核心机制
+
+详细解释核心实现。
+
+## 关键配置
+
+配置项汇总表。
+</code></pre>
+<h2>术语提示</h2>
+<p>使用 <code><span data-term="显示文本" data-tip="tooltip 内容">显示文本</span></code> 语法，构建时转为带 hover 提示的 <code><span></code>：</p>
+<pre><code class="language-markdown"><span data-term="token budget" data-tip="调度器每一轮最多允许处理的新 token 数，是吞吐和延迟的核心控制阀。">token budget</span>
+</code></pre>
+<ul>
+<li>显示文本会同时作为 <code>data-term</code> 属性和页面显示文字</li>
+<li>tooltip 内容放在 <code>term:</code> 后面，直到右括号 <code>)</code> 结束</li>
+<li>tooltip 中不要包含右括号 <code>)</code></li>
+</ul>
+<h2>图表：双轨制（人看 HTML + Agent 看文字）</h2>
+<p>图表是内容与呈现分离的核心场景。每个图表写两份：</p>
+<ol>
+<li><strong><code>:::diagram <id>-html</code></strong> — 原始 HTML+CSS，构建时原样嵌入页面（人看）</li>
+<li><strong><code>:::diagram-desc <id>-html</code></strong> — 纯文字 Markdown 描述，构建时渲染为隐藏的 <code><template></code> 元素（AI agent 读 Markdown 时看到）</li>
+</ol>
+<h3>关键规则：ID 必须一致</h3>
+<p><code>:::diagram</code> 和 <code>:::diagram-desc</code> 的 ID <strong>必须完全相同</strong>：</p>
+<pre><code class="language-markdown">✅ 正确：ID 一致
+```html
+<div class="...">...</div>
+</code></pre>
+<p>纯文字描述这个图表展示的内容...</p>
+<p>❌ 错误：ID 不一致
+...
+:::diagram-desc my-topic          ← 缺少 -html 后缀
+...</p>
+<pre><code>
+### 关键规则：每个图表 ID 必须唯一
+
+同一页面如果有多个图表，每个必须用不同的 ID：
+
+```markdown
+✅ 正确：每个图表有唯一 ID
+...
+...
+
+...
+...
+
+❌ 错误：多个图表共用同一个 ID
+...
+...
+
+...
+...
+</code></pre>
+<h3>命名建议</h3>
+<p>ID 格式：<code><页面缩写>-<图表内容>-html</code></p>
+<table>
+<thead>
+<tr>
+<th>页面</th>
+<th>图表</th>
+<th>推荐ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>scheduler</td>
+<td>调度器心智模型</td>
+<td><code>sched-mental-model-html</code></td>
+</tr>
+<tr>
+<td>scheduler</td>
+<td>调度流程</td>
+<td><code>sched-flow-html</code></td>
+</tr>
+<tr>
+<td>kv-cache</td>
+<td>分页管理</td>
+<td><code>kv-mental-model-html</code></td>
+</tr>
+<tr>
+<td>kv-cache</td>
+<td>张量布局</td>
+<td><code>kv-tensor-layout-html</code></td>
+</tr>
+<tr>
+<td>paged-attention</td>
+<td>核心概念</td>
+<td><code>pa-mental-model-html</code></td>
+</tr>
+</tbody>
+</table>
+<h3>diagram 的 HTML 代码块</h3>
+<p><code>:::diagram</code> 内部用 ```html 代码块包裹 HTML：</p>
+<pre><code class="language-markdown">```html
+<div class="my-diagram">
+  <div class="my-box">内容</div>
+</div>
+</code></pre>
+<pre><code>
+HTML 中的 CSS 类名需要在 `assets/css/components.css` 中定义对应样式。
+
+### diagram-desc 的内容
+
+`:::diagram-desc` 内部写纯 Markdown，描述图表传达的知识：
+
+```markdown
+系统包含三个进程：
+
+**API 服务进程**：运行 HTTP API 服务，处理输入输出。
+
+**EngineCore 进程**：核心推理引擎，包含调度器（Scheduler）和执行器（Executor）。
+
+**Worker 进程**：执行 GPU 计算，返回模型输出。
+
+进程间通过 ZMQ 通信。
+</code></pre>
+<p>注意：<code>diagram-desc</code> 的内容会出现在 Markdown 视图（MD 按钮）中，所以不要和正文中的描述重复。</p>
+<h2>步骤播放器</h2>
+<p>用 <code>:::steps</code> 块定义可交互的步骤序列：</p>
+<pre><code class="language-markdown">### 1. 第一步标题
+步骤描述文字，支持 `代码` 和 **加粗**。
+`vllm/v1/engine/core.py`        ← 源码引用，单独一行
+
+### 2. 第二步标题
+步骤描述文字。
+`vllm/v1/core/sched/scheduler.py`
+</code></pre>
+<p>规则：</p>
+<ul>
+<li><code>id</code> 用于前端 JS 绑定，同一页面内唯一</li>
+<li>每个步骤以 <code>### N. 标题</code> 开头，N 是序号</li>
+<li>步骤体支持 Markdown 格式</li>
+<li>单独一行的 <code>`vllm/...`</code> 会渲染为代码引用样式（<code>code.step-ref</code>）</li>
+<li>构建时自动生成 step-player 控件 + step-list</li>
+</ul>
+<h2>配置表</h2>
+<p>用标准 Markdown 表格：</p>
+<pre><code class="language-markdown">| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `max_num_seqs` | 128 | 最大并发请求数 |
+| `block_size` | 16 | 每个 block 存几个 token 的 KV |
+</code></pre>
+<p>四列表格也支持：</p>
+<pre><code class="language-markdown">| 场景 | 操作 | 如果失败 | 代码位置 |
+|------|------|----------|----------|
+| 新请求 | `allocate_slots()` | 返回 None | `scheduler.py` |
+</code></pre>
+<h2>代码块</h2>
+<p>标准 Markdown 围栏代码块，标注语言：</p>
+<pre><code class="language-markdown">```python
+def step(self):
+    scheduler_output = self.scheduler.schedule()
+    model_output = self.model_executor.execute_model(scheduler_output)
+    return self.scheduler.update_from_output(scheduler_output, model_output)
+```
+</code></pre>
+<p>可以在代码块前一行用普通文字标注源码位置，不用特殊语法。</p>
+<h2>交互模拟</h2>
+<p>交互模拟（<code>data-sim</code>）是纯 JS 驱动的 UI 组件，<strong>不在 Markdown 中声明</strong>。它由 <code>assets/js/app.js</code> 中的 <code>createSim()</code> 函数管理。</p>
+<p>如果页面需要交互模拟，需要同时：</p>
+<ol>
+<li>在 HTML 页面中放置 <code><div class="interactive-sim" data-sim="name"></code> 容器</li>
+<li>在 <code>app.js</code> 中编写模拟步骤数据和渲染函数</li>
+</ol>
+<p>目前这个流程无法通过 Markdown 自动生成，需要手动在构建后的 HTML 中添加。如果你需要交互模拟，请先写好其他内容，构建后单独处理模拟部分。</p>
+<h2>构建与验证</h2>
+<pre><code class="language-bash"># 构建全部
+python scripts/build.py
+
+# 构建单个页面
+python scripts/build.py scheduler
+
+# 监听文件变化自动构建（需要 pip install watchdog）
+python scripts/build.py --watch
+</code></pre>
+<p>验证清单：</p>
+<ol>
+<li>构建无报错</li>
+<li>浏览器打开 HTML，检查排版和图表</li>
+<li>点击 MD 按钮切换 Markdown 视图，确认文字正确、arch-html 块已过滤</li>
+<li>检查页面底部的 JS 控件（step-player 等）正常工作</li>
+<li>如果有交互模拟，确认模拟按钮可用</li>
+</ol>
+<h2>常见问题</h2>
+<h3>Q: category 应该写什么？</h3>
+<p>A: 必须和 <code>content/</code> 下的子目录名<strong>完全一致</strong>。<code>content/core/</code> 下写 <code>category: core</code>，<code>content/optimizations/</code> 下写 <code>category: optimizations</code>。</p>
+<h3>Q: 图表应该用 HTML 还是 Markdown 画？</h3>
+<p>A: 强 UI 类型的图表（进程框图、流程图、状态机等）用 <code>:::diagram *-html</code> 保存原始 HTML。简单表格和列表用 Markdown。同时必须写 <code>:::diagram-desc</code> 给 AI agent 用。</p>
+<h3>Q: <code>:::diagram-desc</code> 和正文内容重复了怎么办？</h3>
+<p>A: 避免重复。如果正文已经有一段描述，<code>diagram-desc</code> 应该只补充图表特有的视觉信息（如"左侧是 API 进程，中间是 EngineCore，右侧是 Worker"），而不是重新写一遍所有知识。或者反过来，正文中省略描述，把完整描述放在 <code>diagram-desc</code> 里。</p>
+<h3>Q: 步骤中的源码引用怎么写？</h3>
+<p>A: 单独一行，用反引号包裹路径：<code>`vllm/v1/engine/core.py`</code>。构建脚本会自动识别以 <code>vllm/</code> 开头或包含 <code>/</code> 的单行 code，渲染为 <code><code class="step-ref"></code>。</p>
+<h3>Q: 怎么添加新的 CSS 样式？</h3>
+<p>A: 在 <code>assets/css/components.css</code> 中添加。<code>:::diagram *-html</code> 中的 HTML 可以使用任意 CSS 类名，只要在 <code>components.css</code> 中有对应样式即可。</p>
+<h3>Q: 旧页面路径变了怎么办？</h3>
+<p>A: 在 <code>pages/</code> 旧路径下放一个 HTML 重定向页：</p>
+<pre><code class="language-html"><!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0;url=../新分类/新文件名.html">
+  <title>旧标题 - vLLM Visual Guide</title>
+</head>
+<body>
+  <p>此页面已迁移至 <a href="../新分类/新文件名.html">新地址</a></p>
+</body>
+</html>
+</code></pre>
+</div>
+    </div>
+
+  </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>
