@@ -1,7 +1,7 @@
 ---
 id: paged-attention
 title: PagedAttention
-category: optimizations
+category: core
 level: intermediate
 status: ready
 readingMinutes: 20

@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>多模态 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="multimodal">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>system</span><span>/</span><span>多模态</span></nav>
+
+    <div class="topic-content" id="topic-content">
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>system</span><span>intermediate</span><span class="status">draft</span><span>14 min</span></div>
+      <h1>多模态</h1>
+      <p class="hero-text">图像、音频、视频等多模态输入的完整处理路径：<span data-term="encoder" data-tip="多模态 encoder 模型（如 ViT、Whisper），将原始媒体编码为特征向量。">encoder</span> 编码 → placeholder 替换 → <span data-term="encoder cache" data-tip="缓存多模态 encoder 的输出特征向量，避免重复计算。">encoder cache</span> 管理 → 与 language model 的融合。</p>
+      <div class="tags"><span class="tag">Multimodal</span><span class="tag">Vision Encoder</span><span class="tag">Placeholder</span><span class="tag">Encoder Cache</span></div>
+    </section>
+
+
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      
+<pre class="diagram-raw"><div class="arch-diagram">
+<div class="arch-row">
+  <div class="arch-box">Image/Audio/Video</div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Processor</div>
+    <div class="arch-proc-sub">预处理 + Placeholder</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-highlight">
+    <div class="arch-module">Encoder</div>
+    <div class="arch-module">ViT/Whisper</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-box">Encoder Cache</div>
+</div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="mm-mental-model-html"><p>多模态推理的关键路径：原始媒体输入（图像/音频/视频）→ Processor（预处理和 Placeholder 插入）→ Encoder（ViT/Whisper 等编码器，将媒体编码为特征向量）→ Encoder Cache（缓存 encoder 输出，避免重复计算）。最终特征向量在 LLM forward 时替换 placeholder 位置。</p>
+</template>
+<p>多模态推理的关键：将媒体特征无缝注入 language model 的 token 序列，同时管理 encoder 计算开销。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>多模态 Registry</h2>
+      
+<p><a href="term:%E5%85%A8%E5%B1%80%E5%8D%95%E4%BE%8B%E6%B3%A8%E5%86%8C%E8%A1%A8%EF%BC%8C%E7%AE%A1%E7%90%86%E6%A8%A1%E5%9E%8B%E4%B8%8E%E5%A4%9A%E6%A8%A1%E6%80%81%E5%A4%84%E7%90%86%E7%AE%A1%E7%BA%BF%E7%9A%84%E6%98%A0%E5%B0%84%E5%85%B3%E7%B3%BB%E3%80%82">MultiModalRegistry</a> 是核心调度机制，通过 <code>register_processor</code> 装饰器将模型类与三组件绑定：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ProcessingInfo</code></td>
+<td>模型特定知识：支持的模态、最大 token 数</td>
+</tr>
+<tr>
+<td><code>MultiModalProcessor</code></td>
+<td>处理管线：HF Processor → placeholder → 特征提取</td>
+</tr>
+<tr>
+<td><code>DummyInputsBuilder</code></td>
+<td>生成最坏情况输入，用于显存 profiling</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">@MULTIMODAL_REGISTRY.register_processor(
+    info=Qwen2VLProcessingInfo,
+    processor=Qwen2VLMultiModalProcessor,
+    dummy_inputs=Qwen2VLDummyInputsBuilder,
+)
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
+    ...
+</code></pre>
+<p>构建链：<code>InputProcessingContext</code> → <code>BaseProcessingInfo</code> → <code>BaseDummyInputsBuilder</code> → <code>BaseMultiModalProcessor</code></p>
+<p><code>vllm/multimodal/registry.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Processor Pipeline</h2>
+      
+<p>三步处理流程：</p>
+<div class="step-player" id="mm-pipeline-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 3</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="mm-pipeline-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>HF Processor</h3>对 prompt 文本 + 多模态数据调用 HuggingFace Processor，生成 token IDs 和处理后的张量。
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>Placeholder 替换</h3>在 token IDs 中找到占位符（如 <code><image></code>），替换为与特征尺寸匹配的 placeholder token 数量。
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>Placeholder 信息提取</h3>从处理后的 token IDs 中提取 placeholder 位置信息（offset、length），用于后续特征注入。
+</div></div></div>
+<h3>增量处理与缓存</h3>
+<p>为避免重复处理相同的媒体输入，Processor 支持增量处理：</p>
+<ol>
+<li>计算所有媒体项的 hash</li>
+<li>检查缓存，只处理<strong>未命中</strong>的项</li>
+<li>合并缓存结果和新处理结果</li>
+</ol>
+<p>缓存分两级：</p>
+<ul>
+<li><strong>P0（API 进程）</strong>：<code>MultiModalProcessorOnlyCache</code>，单进程 LRU</li>
+<li><strong>P1（Core 进程）</strong>：<code>MultiModalReceiverCache</code>，IPC 镜像 LRU</li>
+</ul>
+<p><code>vllm/multimodal/processing/processor.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Placeholder 机制</h2>
+      
+<p><span data-term="PlaceholderRange" data-tip="记录多模态特征在 token 序列中位置的数据结构，包含 offset、length 和 is_embed 掩码。">PlaceholderRange</span> 是核心数据结构：</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class PlaceholderRange:
+    offset: int                    # 在 prompt 中的起始位置
+    length: int                    # placeholder token 数量
+    is_embed: torch.Tensor | None  # 布尔掩码，标记哪些位置是 embedding
+</code></pre>
+<h3>两种替换模式</h3>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>说明</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PromptReplacement</code></td>
+<td>替换 <code><image></code> 为 N 个 placeholder</td>
+<td><code><image></code> → <code><image_pad></code> × N</td>
+</tr>
+<tr>
+<td><code>PromptInsertion</code></td>
+<td>在指定位置插入 token</td>
+<td>在 prompt 开头插入特殊 token</td>
+</tr>
+</tbody>
+</table>
+<h3>部分嵌入控制</h3>
+<p>某些模型（如 Qwen2-VL）的 placeholder 包含<strong>文本 token</strong> 和 <strong>特征 token</strong> 的混合：</p>
+<pre><code class="language-python"># Qwen2-VL: <image_bos> + <image_pad>×N + <image_eos>
+PromptUpdateDetails(
+    full=[image_bos_id] + [image_pad_id] * N + [image_eos_id],
+    is_embed=select_token_id(full, image_pad_id),  # 只有 image_pad 是 embedding
+)
+</code></pre>
+<p><code>is_embed</code> 掩码精确控制哪些位置接收 encoder 输出的特征，哪些保留原始 token embedding。</p>
+<p><code>vllm/multimodal/inputs.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Encoder Cache 管理</h2>
+      
+<p>调度器级的 <span data-term="EncoderCacheManager" data-tip="管理多模态 encoder 输出的 GPU 显存分配与回收，通过 mm_hash 索引缓存条目。">EncoderCacheManager</span> 控制缓存空间：</p>
+<h3>缓存生命周期</h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>check_and_update_cache()</code></td>
+<td>检查 mm_hash 是否已缓存，命中则增加引用计数</td>
+</tr>
+<tr>
+<td><code>can_allocate()</code></td>
+<td>检查是否有足够空间，不够则 FIFO 驱逐最旧未引用条目</td>
+</tr>
+<tr>
+<td><code>free_encoder_input()</code></td>
+<td>释放引用，标记为可驱逐（但数据仍在显存中）</td>
+</tr>
+</tbody>
+</table>
+<p>关键设计：释放时数据<strong>不立即清除</strong>，只在显存紧张时驱逐。新请求仍可命中刚释放的缓存。</p>
+<pre><code class="language-python"># 驱逐逻辑：FIFO 淘汰最旧的无引用条目
+while num_embeds > self.num_free_slots:
+    mm_hash, num_free = self.freeable.popitem(last=False)
+    del self.cached[mm_hash]
+    self.freed.append(mm_hash)
+</code></pre>
+<p><code>vllm/v1/core/encoder_cache_manager.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Encoder Compute Budget</h2>
+      
+<p>控制 encoder 计算资源，防止阻塞 LLM 推理：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>encoder_compute_budget</code></td>
+<td>= max_num_batched_tokens</td>
+<td>单步最大 encoder token 数</td>
+</tr>
+<tr>
+<td><code>encoder_cache_size</code></td>
+<td>= max_num_batched_tokens</td>
+<td>encoder 输出缓存容量</td>
+</tr>
+</tbody>
+</table>
+<p><span data-term="MultiModalBudget" data-tip="计算多模态 encoder 的计算预算和缓存容量，确保单个媒体项能被完整处理。">MultiModalBudget</span> 根据模型配置计算每种模态的最大项数，约束条件包括：</p>
+<ul>
+<li>encoder 预算</li>
+<li>decoder 预算</li>
+<li>用户限制</li>
+<li>模型最大序列长度</li>
+</ul>
+<p><code>vllm/multimodal/encoder_budget.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>CUDA Graph 兼容</h2>
+      
+<p>多模态输入对 CUDA Graph 捕获的影响与处理策略：</p>
+<table>
+<thead>
+<tr>
+<th>挑战</th>
+<th>解决方案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>动态 token 数量</td>
+<td>Encoder 在 CG <strong>外部</strong>运行，仅 decoder 被 CG 捕获</td>
+</tr>
+<tr>
+<td>Placeholder 动态 shape</td>
+<td>特征注入在 CG replay 之前完成</td>
+</tr>
+<tr>
+<td>部分调度 MM 输入</td>
+<td><code>disable_chunked_mm_input</code> 禁止拆分 MM 项</td>
+</tr>
+<tr>
+<td>显存 profiling</td>
+<td>DummyInputsBuilder 使用最坏情况 MM 输入</td>
+</tr>
+</tbody>
+</table>
+<p><code>disable_chunked_mm_input=True</code> 时，文本 token 先调度，完整 MM 项在下一步调度，避免部分 encoder 计算。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>limit_mm_per_prompt</code></td>
+<td><code>{}</code></td>
+<td>每种模态每 prompt 最大项数</td>
+</tr>
+<tr>
+<td><code>mm_processor_kwargs</code></td>
+<td><code>None</code></td>
+<td>传递给 HF Processor 的额外参数</td>
+</tr>
+<tr>
+<td><code>mm_processor_cache_gb</code></td>
+<td>4</td>
+<td>Processor 缓存大小（GiB）</td>
+</tr>
+<tr>
+<td><code>mm_processor_cache_type</code></td>
+<td><code>"lru"</code></td>
+<td>缓存类型：<code>lru</code> 或 <code>shm</code></td>
+</tr>
+<tr>
+<td><code>disable_chunked_mm_input</code></td>
+<td>False</td>
+<td>禁止拆分 MM 项跨调度步骤</td>
+</tr>
+<tr>
+<td><code>mm_encoder_tp_mode</code></td>
+<td><code>"weights"</code></td>
+<td>Encoder TP 策略</td>
+</tr>
+<tr>
+<td><code>skip_mm_profiling</code></td>
+<td>False</td>
+<td>跳过 MM 显存 profiling 加速启动</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/multimodal.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<pre><code class="language-html"><div class="arch-diagram">
+<div class="arch-row">
+  <div class="arch-box">Image/Audio/Video</div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Processor</div>
+    <div class="arch-proc-sub">预处理 + Placeholder</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-highlight">
+    <div class="arch-module">Encoder</div>
+    <div class="arch-module">ViT/Whisper</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-box">Encoder Cache</div>
+</div>
+</div>
+</code></pre>
+<p>多模态推理的关键路径：原始媒体输入（图像/音频/视频）→ Processor（预处理和 Placeholder 插入）→ Encoder（ViT/Whisper 等编码器，将媒体编码为特征向量）→ Encoder Cache（缓存 encoder 输出，避免重复计算）。最终特征向量在 LLM forward 时替换 placeholder 位置。</p>
+<p>多模态推理的关键：将媒体特征无缝注入 language model 的 token 序列，同时管理 encoder 计算开销。</p>
+<h2>多模态 Registry</h2>
+<p><a href="term:%E5%85%A8%E5%B1%80%E5%8D%95%E4%BE%8B%E6%B3%A8%E5%86%8C%E8%A1%A8%EF%BC%8C%E7%AE%A1%E7%90%86%E6%A8%A1%E5%9E%8B%E4%B8%8E%E5%A4%9A%E6%A8%A1%E6%80%81%E5%A4%84%E7%90%86%E7%AE%A1%E7%BA%BF%E7%9A%84%E6%98%A0%E5%B0%84%E5%85%B3%E7%B3%BB%E3%80%82">MultiModalRegistry</a> 是核心调度机制，通过 <code>register_processor</code> 装饰器将模型类与三组件绑定：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ProcessingInfo</code></td>
+<td>模型特定知识：支持的模态、最大 token 数</td>
+</tr>
+<tr>
+<td><code>MultiModalProcessor</code></td>
+<td>处理管线：HF Processor → placeholder → 特征提取</td>
+</tr>
+<tr>
+<td><code>DummyInputsBuilder</code></td>
+<td>生成最坏情况输入，用于显存 profiling</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">@MULTIMODAL_REGISTRY.register_processor(
+    info=Qwen2VLProcessingInfo,
+    processor=Qwen2VLMultiModalProcessor,
+    dummy_inputs=Qwen2VLDummyInputsBuilder,
+)
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
+    ...
+</code></pre>
+<p>构建链：<code>InputProcessingContext</code> → <code>BaseProcessingInfo</code> → <code>BaseDummyInputsBuilder</code> → <code>BaseMultiModalProcessor</code></p>
+<p><code>vllm/multimodal/registry.py</code></p>
+<h2>Processor Pipeline</h2>
+<p>三步处理流程：</p>
+<h3>1. HF Processor</h3>
+<p>对 prompt 文本 + 多模态数据调用 HuggingFace Processor，生成 token IDs 和处理后的张量。</p>
+<h3>2. Placeholder 替换</h3>
+<p>在 token IDs 中找到占位符（如 <code><image></code>），替换为与特征尺寸匹配的 placeholder token 数量。</p>
+<h3>3. Placeholder 信息提取</h3>
+<p>从处理后的 token IDs 中提取 placeholder 位置信息（offset、length），用于后续特征注入。</p>
+<h3>增量处理与缓存</h3>
+<p>为避免重复处理相同的媒体输入，Processor 支持增量处理：</p>
+<ol>
+<li>计算所有媒体项的 hash</li>
+<li>检查缓存，只处理<strong>未命中</strong>的项</li>
+<li>合并缓存结果和新处理结果</li>
+</ol>
+<p>缓存分两级：</p>
+<ul>
+<li><strong>P0（API 进程）</strong>：<code>MultiModalProcessorOnlyCache</code>，单进程 LRU</li>
+<li><strong>P1（Core 进程）</strong>：<code>MultiModalReceiverCache</code>，IPC 镜像 LRU</li>
+</ul>
+<p><code>vllm/multimodal/processing/processor.py</code></p>
+<h2>Placeholder 机制</h2>
+<p><span data-term="PlaceholderRange" data-tip="记录多模态特征在 token 序列中位置的数据结构，包含 offset、length 和 is_embed 掩码。">PlaceholderRange</span> 是核心数据结构：</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class PlaceholderRange:
+    offset: int                    # 在 prompt 中的起始位置
+    length: int                    # placeholder token 数量
+    is_embed: torch.Tensor | None  # 布尔掩码，标记哪些位置是 embedding
+</code></pre>
+<h3>两种替换模式</h3>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>说明</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PromptReplacement</code></td>
+<td>替换 <code><image></code> 为 N 个 placeholder</td>
+<td><code><image></code> → <code><image_pad></code> × N</td>
+</tr>
+<tr>
+<td><code>PromptInsertion</code></td>
+<td>在指定位置插入 token</td>
+<td>在 prompt 开头插入特殊 token</td>
+</tr>
+</tbody>
+</table>
+<h3>部分嵌入控制</h3>
+<p>某些模型（如 Qwen2-VL）的 placeholder 包含<strong>文本 token</strong> 和 <strong>特征 token</strong> 的混合：</p>
+<pre><code class="language-python"># Qwen2-VL: <image_bos> + <image_pad>×N + <image_eos>
+PromptUpdateDetails(
+    full=[image_bos_id] + [image_pad_id] * N + [image_eos_id],
+    is_embed=select_token_id(full, image_pad_id),  # 只有 image_pad 是 embedding
+)
+</code></pre>
+<p><code>is_embed</code> 掩码精确控制哪些位置接收 encoder 输出的特征，哪些保留原始 token embedding。</p>
+<p><code>vllm/multimodal/inputs.py</code></p>
+<h2>Encoder Cache 管理</h2>
+<p>调度器级的 <span data-term="EncoderCacheManager" data-tip="管理多模态 encoder 输出的 GPU 显存分配与回收，通过 mm_hash 索引缓存条目。">EncoderCacheManager</span> 控制缓存空间：</p>
+<h3>缓存生命周期</h3>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>check_and_update_cache()</code></td>
+<td>检查 mm_hash 是否已缓存，命中则增加引用计数</td>
+</tr>
+<tr>
+<td><code>can_allocate()</code></td>
+<td>检查是否有足够空间，不够则 FIFO 驱逐最旧未引用条目</td>
+</tr>
+<tr>
+<td><code>free_encoder_input()</code></td>
+<td>释放引用，标记为可驱逐（但数据仍在显存中）</td>
+</tr>
+</tbody>
+</table>
+<p>关键设计：释放时数据<strong>不立即清除</strong>，只在显存紧张时驱逐。新请求仍可命中刚释放的缓存。</p>
+<pre><code class="language-python"># 驱逐逻辑：FIFO 淘汰最旧的无引用条目
+while num_embeds > self.num_free_slots:
+    mm_hash, num_free = self.freeable.popitem(last=False)
+    del self.cached[mm_hash]
+    self.freed.append(mm_hash)
+</code></pre>
+<p><code>vllm/v1/core/encoder_cache_manager.py</code></p>
+<h2>Encoder Compute Budget</h2>
+<p>控制 encoder 计算资源，防止阻塞 LLM 推理：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>encoder_compute_budget</code></td>
+<td>= max_num_batched_tokens</td>
+<td>单步最大 encoder token 数</td>
+</tr>
+<tr>
+<td><code>encoder_cache_size</code></td>
+<td>= max_num_batched_tokens</td>
+<td>encoder 输出缓存容量</td>
+</tr>
+</tbody>
+</table>
+<p><span data-term="MultiModalBudget" data-tip="计算多模态 encoder 的计算预算和缓存容量，确保单个媒体项能被完整处理。">MultiModalBudget</span> 根据模型配置计算每种模态的最大项数，约束条件包括：</p>
+<ul>
+<li>encoder 预算</li>
+<li>decoder 预算</li>
+<li>用户限制</li>
+<li>模型最大序列长度</li>
+</ul>
+<p><code>vllm/multimodal/encoder_budget.py</code></p>
+<h2>CUDA Graph 兼容</h2>
+<p>多模态输入对 CUDA Graph 捕获的影响与处理策略：</p>
+<table>
+<thead>
+<tr>
+<th>挑战</th>
+<th>解决方案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>动态 token 数量</td>
+<td>Encoder 在 CG <strong>外部</strong>运行，仅 decoder 被 CG 捕获</td>
+</tr>
+<tr>
+<td>Placeholder 动态 shape</td>
+<td>特征注入在 CG replay 之前完成</td>
+</tr>
+<tr>
+<td>部分调度 MM 输入</td>
+<td><code>disable_chunked_mm_input</code> 禁止拆分 MM 项</td>
+</tr>
+<tr>
+<td>显存 profiling</td>
+<td>DummyInputsBuilder 使用最坏情况 MM 输入</td>
+</tr>
+</tbody>
+</table>
+<p><code>disable_chunked_mm_input=True</code> 时，文本 token 先调度，完整 MM 项在下一步调度，避免部分 encoder 计算。</p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>limit_mm_per_prompt</code></td>
+<td><code>{}</code></td>
+<td>每种模态每 prompt 最大项数</td>
+</tr>
+<tr>
+<td><code>mm_processor_kwargs</code></td>
+<td><code>None</code></td>
+<td>传递给 HF Processor 的额外参数</td>
+</tr>
+<tr>
+<td><code>mm_processor_cache_gb</code></td>
+<td>4</td>
+<td>Processor 缓存大小（GiB）</td>
+</tr>
+<tr>
+<td><code>mm_processor_cache_type</code></td>
+<td><code>"lru"</code></td>
+<td>缓存类型：<code>lru</code> 或 <code>shm</code></td>
+</tr>
+<tr>
+<td><code>disable_chunked_mm_input</code></td>
+<td>False</td>
+<td>禁止拆分 MM 项跨调度步骤</td>
+</tr>
+<tr>
+<td><code>mm_encoder_tp_mode</code></td>
+<td><code>"weights"</code></td>
+<td>Encoder TP 策略</td>
+</tr>
+<tr>
+<td><code>skip_mm_profiling</code></td>
+<td>False</td>
+<td>跳过 MM 显存 profiling 加速启动</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/multimodal.py</code></p>
+</div>
+    </div>
+
+  </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

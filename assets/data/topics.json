@@ -14,20 +14,17 @@
   {
     "id": "process-communication",
     "title": "进程与通信",
-    "subtitle": "ZMQ 帧协议、共享内存、线程 Queue、NCCL 集合通信、TP/SP/CP 卡间通信模式",
-    "href": "pages/distributed/process-communication.html",
-    "category": "distributed",
+    "subtitle": "ZMQ 帧协议、共享内存、线程 Queue、NCCL 集合通信",
+    "href": "pages/core/process-communication.html",
+    "category": "core",
     "level": "intermediate",
     "status": "ready",
     "readingMinutes": 22,
-    "tags": ["ZMQ", "Shared Memory", "NCCL", "TP", "SP", "CP"],
+    "tags": ["ZMQ", "Shared Memory", "NCCL"],
     "codeRefs": [
       "vllm/v1/engine/core_client.py",
       "vllm/distributed/device_communicators/shm_broadcast.py",
-      "vllm/distributed/parallel_state.py",
-      "vllm/model_executor/layers/linear.py",
-      "vllm/compilation/passes/fusion/sequence_parallelism.py",
-      "vllm/v1/attention/ops/dcp_alltoall.py"
+      "vllm/distributed/parallel_state.py"
     ]
   },
   {
@@ -73,8 +70,8 @@
     "id": "paged-attention",
     "title": "PagedAttention",
     "subtitle": "分页式 KV 访问：Block Table、Slot Mapping、Attention Metadata 与 Backend 选择",
-    "href": "pages/optimizations/paged-attention.html",
-    "category": "optimizations",
+    "href": "pages/core/paged-attention.html",
+    "category": "core",
     "level": "intermediate",
     "status": "ready",
     "readingMinutes": 20,
@@ -84,7 +81,7 @@
   {
     "id": "parallelism",
     "title": "并行策略总览",
-    "subtitle": "TP、PP、DP、EP、Context Parallel 的统一入口",
+    "subtitle": "TP、PP、DP、EP、CP、SP 的统一入口与组合约束",
     "href": "pages/distributed/parallelism.html",
     "category": "distributed",
     "level": "advanced",
@@ -96,7 +93,7 @@
   {
     "id": "tensor-parallel",
     "title": "Tensor Parallel",
-    "subtitle": "张量切分、all-reduce 与 all-gather 的可视化",
+    "subtitle": "权重切分、all-reduce 与 all-gather 的通信模式",
     "href": "pages/distributed/tensor-parallel.html",
     "category": "distributed",
     "level": "advanced",
@@ -108,7 +105,7 @@
   {
     "id": "data-parallel",
     "title": "Data Parallel",
-    "subtitle": "DP 基本原理、DP attention 与负载均衡",
+    "subtitle": "多 EngineCore 独立调度、DP attention 与负载均衡",
     "href": "pages/distributed/data-parallel.html",
     "category": "distributed",
     "level": "intermediate",
@@ -120,7 +117,7 @@
   {
     "id": "context-parallel",
     "title": "Context Parallel",
-    "subtitle": "DCP（Decode Context Parallel）与 PCP（Prefill Context Parallel）原理",
+    "subtitle": "DCP 与 PCP 原理、LSE 校正与 all-to-all 通信",
     "href": "pages/distributed/context-parallel.html",
     "category": "distributed",
     "level": "advanced",
@@ -144,7 +141,7 @@
   {
     "id": "pipeline-parallel",
     "title": "Pipeline Parallel",
-    "subtitle": "层切分、microbatch 和 pipeline bubble",
+    "subtitle": "层切分、microbatch、pipeline bubble 与 batch queue",
     "href": "pages/distributed/pipeline-parallel.html",
     "category": "distributed",
     "level": "advanced",
@@ -166,16 +163,16 @@
     "codeRefs": ["vllm/model_executor/models/deepseek_v2.py", "vllm/model_executor/layers/fused_moe/layer.py"]
   },
   {
-    "id": "deepseek-mla",
-    "title": "DeepSeek MLA",
-    "subtitle": "MLA 将 KV 压缩到低维隐向量，MoE grouped top-k 路由",
-    "href": "pages/models/deepseek-mla.html",
-    "category": "models",
+    "id": "disaggregated-prefill",
+    "title": "Disaggregated Prefill",
+    "subtitle": "Prefill 与 Decode 分离部署，KV Connector 异步传输",
+    "href": "pages/distributed/disaggregated-prefill.html",
+    "category": "distributed",
     "level": "advanced",
     "status": "draft",
     "readingMinutes": 14,
-    "tags": ["DeepSeek", "MLA", "MoE"],
-    "codeRefs": ["vllm/model_executor/models/deepseek_v2.py", "vllm/model_executor/layers/mla.py"]
+    "tags": ["Disaggregated Prefill", "KV Transfer"],
+    "codeRefs": ["vllm/distributed/kv_transfer/kv_connector/v1/base.py"]
   },
   {
     "id": "speculative-decoding",
@@ -202,9 +199,21 @@
     "codeRefs": ["vllm/v1/spec_decode/eagle.py", "vllm/v1/spec_decode/llm_base_proposer.py"]
   },
   {
+    "id": "mtp",
+    "title": "MTP 投机解码",
+    "subtitle": "Multi-Token Prediction：共享 embedding/LM head 的预测层，含 Step3.5、Gemma4 等变体",
+    "href": "pages/decoding/mtp.html",
+    "category": "decoding",
+    "level": "advanced",
+    "status": "draft",
+    "readingMinutes": 14,
+    "tags": ["MTP", "Speculative Decoding", "Multi-Token Prediction"],
+    "codeRefs": ["vllm/v1/spec_decode/llm_base_proposer.py", "vllm/v1/spec_decode/gemma4.py"]
+  },
+  {
     "id": "ngram",
     "title": "N-gram 投机解码",
-    "subtitle": "无需神经模型，通过 n-gram 模式匹配预测后续 token",
+    "subtitle": "无需神经模型，通过 n-gram 模式匹配预测后续 token（CPU/GPU 双实现）",
     "href": "pages/decoding/ngram.html",
     "category": "decoding",
     "level": "intermediate",
@@ -238,18 +247,6 @@
     "codeRefs": ["vllm/v1/spec_decode/dflash.py"]
   },
   {
-    "id": "step3p5",
-    "title": "Step 3.5",
-    "subtitle": "基于 MTP 的多 token 预测，共享 target 的 embedding 和 LM head",
-    "href": "pages/decoding/step3p5.html",
-    "category": "decoding",
-    "level": "advanced",
-    "status": "draft",
-    "readingMinutes": 10,
-    "tags": ["Step3.5", "MTP", "Speculative Decoding"],
-    "codeRefs": ["vllm/v1/spec_decode/llm_base_proposer.py", "vllm/model_executor/models/step3p5_mtp.py"]
-  },
-  {
     "id": "suffix-decoding",
     "title": "Suffix Decoding",
     "subtitle": "基于后缀树的模式匹配投机解码",
@@ -262,16 +259,88 @@
     "codeRefs": ["vllm/v1/spec_decode/suffix_decoding.py"]
   },
   {
-    "id": "gemma4-spec",
-    "title": "Gemma4 投机解码",
-    "subtitle": "Gemma4 内置 MTP，跨模型 KV 共享",
-    "href": "pages/decoding/gemma4-spec.html",
-    "category": "decoding",
+    "id": "cuda-graph",
+    "title": "CUDA Graph",
+    "subtitle": "decode 阶段核心加速：消除 CPU launch overhead，FULL/PIECEWISE 模式",
+    "href": "pages/execution/cuda-graph.html",
+    "category": "execution",
+    "level": "advanced",
+    "status": "outline",
+    "readingMinutes": 16,
+    "tags": ["CUDA Graph", "Performance", "Decode"],
+    "codeRefs": ["vllm/v1/worker/gpu/cudagraph_utils.py", "vllm/v1/cudagraph_dispatcher.py"]
+  },
+  {
+    "id": "structured-output",
+    "title": "结构化输出",
+    "subtitle": "Grammar bitmask 约束采样，支持 JSON/Regex/Choice/Grammar",
+    "href": "pages/execution/structured-output.html",
+    "category": "execution",
     "level": "intermediate",
-    "status": "draft",
-    "readingMinutes": 10,
-    "tags": ["Gemma4", "Speculative Decoding"],
-    "codeRefs": ["vllm/v1/spec_decode/gemma4.py", "vllm/model_executor/models/gemma4_mtp.py"]
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["Structured Output", "Grammar", "JSON"],
+    "codeRefs": ["vllm/v1/structured_output/__init__.py", "vllm/v1/worker/gpu/structured_outputs.py"]
+  },
+  {
+    "id": "sampling",
+    "title": "采样与 Logits 处理",
+    "subtitle": "从 logits 到 token：temperature/top-k/top-p/min-p、惩罚、bad words 与 rejection sampler",
+    "href": "pages/execution/sampling.html",
+    "category": "execution",
+    "level": "intermediate",
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["Sampling", "Logits", "Rejection Sampler"],
+    "codeRefs": ["vllm/v1/sample/sampler.py", "vllm/v1/sample/ops/topk_topp_sampler.py", "vllm/v1/sample/logits_processor/builtin.py"]
+  },
+  {
+    "id": "model-runner",
+    "title": "Model Runner",
+    "subtitle": "调度与 GPU 执行的桥梁：input 准备、forward、采样与 draft proposal",
+    "href": "pages/execution/model-runner.html",
+    "category": "execution",
+    "level": "advanced",
+    "status": "outline",
+    "readingMinutes": 16,
+    "tags": ["ModelRunner", "Forward", "GPU"],
+    "codeRefs": ["vllm/v1/worker/gpu_model_runner.py", "vllm/v1/worker/gpu/model_runner.py"]
+  },
+  {
+    "id": "lora",
+    "title": "LoRA",
+    "subtitle": "多 LoRA 并发推理：Punica SGMV kernel、LRU adapter 管理",
+    "href": "pages/system/lora.html",
+    "category": "system",
+    "level": "intermediate",
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["LoRA", "Adapter", "Punica"],
+    "codeRefs": ["vllm/lora/lora_model.py", "vllm/lora/punica_wrapper/punica_gpu.py", "vllm/v1/worker/lora_model_runner_mixin.py"]
+  },
+  {
+    "id": "multimodal",
+    "title": "多模态",
+    "subtitle": "图像/音频/视频输入处理：encoder 编码、placeholder 替换、encoder cache 管理",
+    "href": "pages/system/multimodal.html",
+    "category": "system",
+    "level": "intermediate",
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["Multimodal", "Encoder", "Vision"],
+    "codeRefs": ["vllm/multimodal/registry.py", "vllm/multimodal/processing/base_processor.py", "vllm/v1/core/encoder_cache_manager.py"]
+  },
+  {
+    "id": "kv-connector",
+    "title": "KV Connector",
+    "subtitle": "跨进程 KV Cache 传输：15 种实现从 P2P NCCL 到 RDMA 到分布式缓存",
+    "href": "pages/system/kv-connector.html",
+    "category": "system",
+    "level": "advanced",
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["KV Connector", "KV Transfer", "Disaggregated"],
+    "codeRefs": ["vllm/v1/worker/gpu/kv_connector.py", "vllm/distributed/kv_transfer/kv_connector/v1/base.py"]
   },
   {
     "id": "prefix-caching",
@@ -310,16 +379,40 @@
     "codeRefs": ["vllm/model_executor/layers/quantization/fp8.py", "vllm/model_executor/layers/quantization/__init__.py"]
   },
   {
-    "id": "disaggregated-prefill",
-    "title": "Disaggregated Prefill",
-    "subtitle": "Prefill 与 Decode 分离部署，KV Connector 异步传输",
-    "href": "pages/distributed/disaggregated-prefill.html",
-    "category": "distributed",
+    "id": "deepseek-mla",
+    "title": "DeepSeek MLA",
+    "subtitle": "MLA 将 KV 压缩到低维隐向量，12 种 attention backend",
+    "href": "pages/models/deepseek-mla.html",
+    "category": "models",
     "level": "advanced",
     "status": "draft",
     "readingMinutes": 14,
-    "tags": ["Disaggregated Prefill", "KV Transfer"],
-    "codeRefs": ["vllm/distributed/kv_transfer/kv_connector/v1/base.py"]
+    "tags": ["DeepSeek", "MLA", "MoE"],
+    "codeRefs": ["vllm/model_executor/models/deepseek_v2.py", "vllm/model_executor/layers/mla.py"]
+  },
+  {
+    "id": "moe",
+    "title": "MoE 架构",
+    "subtitle": "MoE 路由、FusedMoE kernel、EP 负载均衡与主要模型变体",
+    "href": "pages/models/moe.html",
+    "category": "models",
+    "level": "advanced",
+    "status": "outline",
+    "readingMinutes": 14,
+    "tags": ["MoE", "Expert Parallel", "FusedMoE"],
+    "codeRefs": ["vllm/model_executor/layers/fused_moe/layer.py", "vllm/v1/worker/gpu/eplb_utils.py"]
+  },
+  {
+    "id": "mamba-hybrid",
+    "title": "Mamba 混合架构",
+    "subtitle": "Mamba SSM + Attention 混合层、混合 KV Cache 管理",
+    "href": "pages/models/mamba-hybrid.html",
+    "category": "models",
+    "level": "advanced",
+    "status": "outline",
+    "readingMinutes": 12,
+    "tags": ["Mamba", "SSM", "Hybrid"],
+    "codeRefs": ["vllm/model_executor/models/mamba.py", "vllm/v1/kv_cache_interface.py"]
   },
   {
     "id": "glossary",

@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KV Connector - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="kv-connector">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>system</span><span>/</span><span>KV Connector</span></nav>
+
+    <div class="topic-content" id="topic-content">
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>system</span><span>advanced</span><span class="status">draft</span><span>14 min</span></div>
+      <h1>KV Connector</h1>
+      <p class="hero-text">跨进程/跨节点传输 KV Cache 的统一接口：<span data-term="KV Connector" data-tip="vLLM 定义的标准接口，支持多种底层实现（NIXL/Mooncake/LMCache/P2P NCCL 等）在 EngineCore 间传输 KV blocks。">KV Connector</span> 支持 15 种实现，从 P2P NCCL 到 RDMA（Mooncake）到分布式缓存（LMCache）。</p>
+      <div class="tags"><span class="tag">KV Connector</span><span class="tag">KV Transfer</span><span class="tag">Disaggregated</span><span class="tag">RDMA</span><span class="tag">KV Offload</span></div>
+    </section>
+
+
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      
+<pre class="diagram-raw"><div class="arch-diagram">
+<div class="arch-row">
+  <div class="arch-box">EngineCore A</div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">KV Connector</div>
+    <div class="arch-proc-sub">统一传输接口</div>
+  </div>
+  <div class="arch-arrow">↔</div>
+  <div class="arch-highlight">
+    <div class="arch-module">NCCL</div>
+    <div class="arch-module">RDMA</div>
+    <div class="arch-module">LMCache</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-box">EngineCore B</div>
+</div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kvconn-mental-model-html"><p>KV Connector 是 EngineCore 之间传输 KV Cache 的统一接口。EngineCore A 通过 KV Connector 的统一 API 发起传输，底层可以是 NCCL（P2P 直接通信）、RDMA（Mooncake 远程直接内存访问）、LMCache（分布式缓存）等不同实现。EngineCore B 接收 KV blocks 并注入本地 KV cache。核心价值：解耦传输逻辑与调度/执行逻辑，多种传输后端无缝切换。</p>
+</template>
+<p>KV Connector 的核心价值：<strong>解耦 KV 传输逻辑与调度/执行逻辑</strong>，支持多种传输后端无缝切换。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>KVConnectorFactory 接口</h2>
+      
+<p><span data-term="KVConnectorFactory" data-tip="使用延迟加载注册表模式的工厂类，根据名称创建对应的 KV Connector 实例。">KVConnectorFactory</span> 使用延迟加载注册表模式：</p>
+<pre><code class="language-python">_registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
+
+@classmethod
+def create_connector(cls, config, role, kv_cache_config):
+    connector_cls = cls.get_connector_class(kv_transfer_config)
+    return connector_cls(config, role, kv_cache_config)
+</code></pre>
+<p>关键设计：<strong>显式分为两种角色</strong>：</p>
+<ul>
+<li><code>KVConnectorRole.SCHEDULER</code>：调度器侧，决定缓存命中和传输计划</li>
+<li><code>KVConnectorRole.WORKER</code>：Worker 侧，执行实际的 KV 加载和保存</li>
+</ul>
+<h3>基类抽象方法</h3>
+<p><strong>Worker 侧：</strong></p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_load_kv()</code></td>
+<td>开始从 connector 加载 KV 到 paged buffer</td>
+</tr>
+<tr>
+<td><code>wait_for_layer_load()</code></td>
+<td>阻塞等待特定层的 KV 加载完成</td>
+</tr>
+<tr>
+<td><code>save_kv_layer()</code></td>
+<td>开始保存一层 KV cache 到 connector</td>
+</tr>
+<tr>
+<td><code>wait_for_save()</code></td>
+<td>阻塞等待所有保存操作完成</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Scheduler 侧：</strong></p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_num_new_matched_tokens()</code></td>
+<td>返回 (命中 token 数, 是否异步加载)</td>
+</tr>
+<tr>
+<td><code>update_state_after_alloc()</code></td>
+<td>块分配后更新 connector 状态</td>
+</tr>
+<tr>
+<td><code>build_connector_meta()</code></td>
+<td>构建本步的不透明元数据</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>主要 Connector 实现</h2>
+      
+<p>15 种已注册的实现，按传输方式分类：</p>
+<table>
+<thead>
+<tr>
+<th>Connector</th>
+<th>传输方式</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>P2pNcclConnector</strong></td>
+<td>NCCL P2P</td>
+<td>显式逐层 send/recv，同步传输</td>
+</tr>
+<tr>
+<td><strong>NixlConnector</strong></td>
+<td>NVIDIA NIXL (RDMA/DMA)</td>
+<td>批量传输，支持 HMA，强制 HND 布局</td>
+</tr>
+<tr>
+<td><strong>MooncakeConnector</strong></td>
+<td>Mooncake RDMA</td>
+<td>P→D 推模式，支持异构 TP，ZMQ 侧通道</td>
+</tr>
+<tr>
+<td><strong>LMCacheConnector</strong></td>
+<td>LMCache 分布式缓存</td>
+<td>支持逐层操作，PIECEWISE CG 要求</td>
+</tr>
+<tr>
+<td><strong>OffloadingConnector</strong></td>
+<td>CPU/磁盘卸载</td>
+<td>全跨层块，HND 布局，LRU/ARC 驱逐</td>
+</tr>
+<tr>
+<td><strong>SimpleCPUOffloadConnector</strong></td>
+<td>CPU 卸载</td>
+<td>简化版，8GB 默认容量</td>
+</tr>
+</tbody>
+</table>
+<h3>三种传输模式对比</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>P2P NCCL</th>
+<th>NIXL/Mooncake</th>
+<th>LMCache</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>传输粒度</td>
+<td>逐层</td>
+<td>批量（全层）</td>
+<td>可选逐层/批量</td>
+</tr>
+<tr>
+<td>异步支持</td>
+<td>否</td>
+<td>是</td>
+<td>否</td>
+</tr>
+<tr>
+<td>跨节点</td>
+<td>是</td>
+<td>是（RDMA）</td>
+<td>是（分布式缓存）</td>
+</tr>
+<tr>
+<td>CG 兼容</td>
+<td>FULL</td>
+<td>FULL</td>
+<td>PIECEWISE（逐层时）</td>
+</tr>
+<tr>
+<td>wait_for_layer_load</td>
+<td>实际等待</td>
+<td>No-op</td>
+<td>实际等待</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>KV Connector 与 Scheduler 的交互</h2>
+      
+<pre class="diagram-raw"><div class="cache-flow">
+  <div class="cache-step" data-step="1">
+    <div class="cache-step-num">1</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">get_num_new_matched_tokens()</div>
+      <div class="cache-step-desc">调度时查询外部缓存命中，若返回 None 则延迟请求</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="2">
+    <div class="cache-step-num">2</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">WAITING_FOR_REMOTE_KVS</div>
+      <div class="cache-step-desc">异步加载时请求进入等待状态，传输完成后重新调度</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="3">
+    <div class="cache-step-num">3</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">build_connector_meta()</div>
+      <div class="cache-step-desc">序列化加载/保存计划，附加到 SchedulerOutput</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="4">
+    <div class="cache-step-num">4</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">finished_recving / finished_sending</div>
+      <div class="cache-step-desc">Worker 完成传输后反馈，Scheduler 重新调度或释放 blocks</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="kvconn-sched-flow-html"><p>KV Connector 与 Scheduler 的交互分四步：</p>
+<ol>
+<li>调度期间调用 get_num_new_matched_tokens() 查询外部缓存命中。若返回 None，请求被延迟（connector 需要更多时间）。</li>
+<li>异步加载时请求进入 WAITING_FOR_REMOTE_KVS 状态，等待远程 KV 传输完成。</li>
+<li>调度完成后调用 build_connector_meta() 序列化加载/保存计划，附加到 SchedulerOutput.kv_connector_metadata。</li>
+<li>Worker 完成传输后返回 finished_recving（重新调度请求）和 finished_sending（释放 blocks）。</li>
+</ol>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>ModelRunner 侧集成</h2>
+      
+<p>Worker 侧的 KV Connector 通过上下文管理器生命周期集成到 ModelRunner：</p>
+<pre><code class="language-python"># 前向计算前
+kv_connector.bind_connector_metadata(metadata)
+kv_connector.start_load_kv(forward_context)  # 开始异步加载
+
+# 模型前向计算（KV 可能正在异步加载中）
+model_output = model(input_ids, positions, ...)
+
+# 前向计算后
+kv_connector.wait_for_save()           # 等待保存完成
+output = kv_connector.get_finished()   # 收集传输完成信息
+kv_connector.clear_connector_metadata()
+</code></pre>
+<p>对于跨层统一 KV cache（<code>prefer_cross_layer_blocks=True</code>），所有层的 KV 数据分配在一块连续 buffer 中，实现高效批量传输。</p>
+<p><code>vllm/v1/worker/kv_connector_model_runner_mixin.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>KV Offload 子系统</h2>
+      
+<p>KV Cache 卸载到 CPU/磁盘的三层架构：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>组件</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Connector</td>
+<td><code>OffloadingConnector</code></td>
+<td>Scheduler + Worker 侧封装</td>
+</tr>
+<tr>
+<td>Spec</td>
+<td><code>CPUOffloadingSpec</code> / <code>TieringOffloadingSpec</code></td>
+<td>配置卸载目标和策略</td>
+</tr>
+<tr>
+<td>Manager</td>
+<td><code>OffloadingManager</code> + <code>OffloadingHandler</code></td>
+<td>LRU/ARC 追踪 + 异步传输引擎</td>
+</tr>
+</tbody>
+</table>
+<h3>CPU 卸载流程</h3>
+<ol>
+<li><strong>查找</strong>：<code>lookup(key)</code> 检查 block 是否已卸载到 CPU</li>
+<li><strong>加载</strong>：<code>prepare_load()</code> → 异步 CPU→GPU 传输</li>
+<li><strong>存储</strong>：<code>prepare_store()</code> → 异步 GPU→CPU 传输</li>
+<li><strong>驱逐</strong>：LRU/ARC 策略淘汰最久未用的 CPU 缓存条目</li>
+</ol>
+<h3>OffloadKey 设计</h3>
+<pre><code class="language-python">OffloadKey = NewType("OffloadKey", bytes)  # block_hash + group_idx
+</code></pre>
+<p>使用原始 bytes 避免 tuple GC 开销，通过 hash 值 + 组索引标识唯一 block。</p>
+<p><code>vllm/v1/kv_offload/base.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kv_connector</code></td>
+<td><code>None</code></td>
+<td>Connector 名称（如 <code>"NixlConnector"</code>）</td>
+</tr>
+<tr>
+<td><code>kv_role</code></td>
+<td><code>None</code></td>
+<td>角色：<code>kv_producer</code> / <code>kv_consumer</code> / <code>kv_both</code></td>
+</tr>
+<tr>
+<td><code>kv_parallel_size</code></td>
+<td>1</td>
+<td>并行实例数（P2pNccl 需 2）</td>
+</tr>
+<tr>
+<td><code>kv_buffer_device</code></td>
+<td>平台设备</td>
+<td>缓冲设备：<code>cuda</code> / <code>cpu</code></td>
+</tr>
+<tr>
+<td><code>kv_buffer_size</code></td>
+<td>1e9</td>
+<td>缓冲区大小（字节）</td>
+</tr>
+<tr>
+<td><code>kv_connector_extra_config</code></td>
+<td><code>{}</code></td>
+<td>Connector 特有配置</td>
+</tr>
+<tr>
+<td><code>kv_load_failure_policy</code></td>
+<td><code>"fail"</code></td>
+<td>加载失败策略：<code>fail</code> 或 <code>recompute</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/kv_transfer.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<pre><code class="language-html"><div class="arch-diagram">
+<div class="arch-row">
+  <div class="arch-box">EngineCore A</div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">KV Connector</div>
+    <div class="arch-proc-sub">统一传输接口</div>
+  </div>
+  <div class="arch-arrow">↔</div>
+  <div class="arch-highlight">
+    <div class="arch-module">NCCL</div>
+    <div class="arch-module">RDMA</div>
+    <div class="arch-module">LMCache</div>
+  </div>
+  <div class="arch-arrow">→</div>
+  <div class="arch-box">EngineCore B</div>
+</div>
+</div>
+</code></pre>
+<p>KV Connector 是 EngineCore 之间传输 KV Cache 的统一接口。EngineCore A 通过 KV Connector 的统一 API 发起传输，底层可以是 NCCL（P2P 直接通信）、RDMA（Mooncake 远程直接内存访问）、LMCache（分布式缓存）等不同实现。EngineCore B 接收 KV blocks 并注入本地 KV cache。核心价值：解耦传输逻辑与调度/执行逻辑，多种传输后端无缝切换。</p>
+<p>KV Connector 的核心价值：<strong>解耦 KV 传输逻辑与调度/执行逻辑</strong>，支持多种传输后端无缝切换。</p>
+<h2>KVConnectorFactory 接口</h2>
+<p><span data-term="KVConnectorFactory" data-tip="使用延迟加载注册表模式的工厂类，根据名称创建对应的 KV Connector 实例。">KVConnectorFactory</span> 使用延迟加载注册表模式：</p>
+<pre><code class="language-python">_registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
+
+@classmethod
+def create_connector(cls, config, role, kv_cache_config):
+    connector_cls = cls.get_connector_class(kv_transfer_config)
+    return connector_cls(config, role, kv_cache_config)
+</code></pre>
+<p>关键设计：<strong>显式分为两种角色</strong>：</p>
+<ul>
+<li><code>KVConnectorRole.SCHEDULER</code>：调度器侧，决定缓存命中和传输计划</li>
+<li><code>KVConnectorRole.WORKER</code>：Worker 侧，执行实际的 KV 加载和保存</li>
+</ul>
+<h3>基类抽象方法</h3>
+<p><strong>Worker 侧：</strong></p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_load_kv()</code></td>
+<td>开始从 connector 加载 KV 到 paged buffer</td>
+</tr>
+<tr>
+<td><code>wait_for_layer_load()</code></td>
+<td>阻塞等待特定层的 KV 加载完成</td>
+</tr>
+<tr>
+<td><code>save_kv_layer()</code></td>
+<td>开始保存一层 KV cache 到 connector</td>
+</tr>
+<tr>
+<td><code>wait_for_save()</code></td>
+<td>阻塞等待所有保存操作完成</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Scheduler 侧：</strong></p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_num_new_matched_tokens()</code></td>
+<td>返回 (命中 token 数, 是否异步加载)</td>
+</tr>
+<tr>
+<td><code>update_state_after_alloc()</code></td>
+<td>块分配后更新 connector 状态</td>
+</tr>
+<tr>
+<td><code>build_connector_meta()</code></td>
+<td>构建本步的不透明元数据</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h2>主要 Connector 实现</h2>
+<p>15 种已注册的实现，按传输方式分类：</p>
+<table>
+<thead>
+<tr>
+<th>Connector</th>
+<th>传输方式</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>P2pNcclConnector</strong></td>
+<td>NCCL P2P</td>
+<td>显式逐层 send/recv，同步传输</td>
+</tr>
+<tr>
+<td><strong>NixlConnector</strong></td>
+<td>NVIDIA NIXL (RDMA/DMA)</td>
+<td>批量传输，支持 HMA，强制 HND 布局</td>
+</tr>
+<tr>
+<td><strong>MooncakeConnector</strong></td>
+<td>Mooncake RDMA</td>
+<td>P→D 推模式，支持异构 TP，ZMQ 侧通道</td>
+</tr>
+<tr>
+<td><strong>LMCacheConnector</strong></td>
+<td>LMCache 分布式缓存</td>
+<td>支持逐层操作，PIECEWISE CG 要求</td>
+</tr>
+<tr>
+<td><strong>OffloadingConnector</strong></td>
+<td>CPU/磁盘卸载</td>
+<td>全跨层块，HND 布局，LRU/ARC 驱逐</td>
+</tr>
+<tr>
+<td><strong>SimpleCPUOffloadConnector</strong></td>
+<td>CPU 卸载</td>
+<td>简化版，8GB 默认容量</td>
+</tr>
+</tbody>
+</table>
+<h3>三种传输模式对比</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>P2P NCCL</th>
+<th>NIXL/Mooncake</th>
+<th>LMCache</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>传输粒度</td>
+<td>逐层</td>
+<td>批量（全层）</td>
+<td>可选逐层/批量</td>
+</tr>
+<tr>
+<td>异步支持</td>
+<td>否</td>
+<td>是</td>
+<td>否</td>
+</tr>
+<tr>
+<td>跨节点</td>
+<td>是</td>
+<td>是（RDMA）</td>
+<td>是（分布式缓存）</td>
+</tr>
+<tr>
+<td>CG 兼容</td>
+<td>FULL</td>
+<td>FULL</td>
+<td>PIECEWISE（逐层时）</td>
+</tr>
+<tr>
+<td>wait_for_layer_load</td>
+<td>实际等待</td>
+<td>No-op</td>
+<td>实际等待</td>
+</tr>
+</tbody>
+</table>
+<h2>KV Connector 与 Scheduler 的交互</h2>
+<pre><code class="language-html"><div class="cache-flow">
+  <div class="cache-step" data-step="1">
+    <div class="cache-step-num">1</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">get_num_new_matched_tokens()</div>
+      <div class="cache-step-desc">调度时查询外部缓存命中，若返回 None 则延迟请求</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="2">
+    <div class="cache-step-num">2</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">WAITING_FOR_REMOTE_KVS</div>
+      <div class="cache-step-desc">异步加载时请求进入等待状态，传输完成后重新调度</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="3">
+    <div class="cache-step-num">3</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">build_connector_meta()</div>
+      <div class="cache-step-desc">序列化加载/保存计划，附加到 SchedulerOutput</div>
+    </div>
+  </div>
+  <div class="cache-step" data-step="4">
+    <div class="cache-step-num">4</div>
+    <div class="cache-step-content">
+      <div class="cache-step-title">finished_recving / finished_sending</div>
+      <div class="cache-step-desc">Worker 完成传输后反馈，Scheduler 重新调度或释放 blocks</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>KV Connector 与 Scheduler 的交互分四步：</p>
+<ol>
+<li>调度期间调用 get_num_new_matched_tokens() 查询外部缓存命中。若返回 None，请求被延迟（connector 需要更多时间）。</li>
+<li>异步加载时请求进入 WAITING_FOR_REMOTE_KVS 状态，等待远程 KV 传输完成。</li>
+<li>调度完成后调用 build_connector_meta() 序列化加载/保存计划，附加到 SchedulerOutput.kv_connector_metadata。</li>
+<li>Worker 完成传输后返回 finished_recving（重新调度请求）和 finished_sending（释放 blocks）。</li>
+</ol>
+<h2>ModelRunner 侧集成</h2>
+<p>Worker 侧的 KV Connector 通过上下文管理器生命周期集成到 ModelRunner：</p>
+<pre><code class="language-python"># 前向计算前
+kv_connector.bind_connector_metadata(metadata)
+kv_connector.start_load_kv(forward_context)  # 开始异步加载
+
+# 模型前向计算（KV 可能正在异步加载中）
+model_output = model(input_ids, positions, ...)
+
+# 前向计算后
+kv_connector.wait_for_save()           # 等待保存完成
+output = kv_connector.get_finished()   # 收集传输完成信息
+kv_connector.clear_connector_metadata()
+</code></pre>
+<p>对于跨层统一 KV cache（<code>prefer_cross_layer_blocks=True</code>），所有层的 KV 数据分配在一块连续 buffer 中，实现高效批量传输。</p>
+<p><code>vllm/v1/worker/kv_connector_model_runner_mixin.py</code></p>
+<h2>KV Offload 子系统</h2>
+<p>KV Cache 卸载到 CPU/磁盘的三层架构：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>组件</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Connector</td>
+<td><code>OffloadingConnector</code></td>
+<td>Scheduler + Worker 侧封装</td>
+</tr>
+<tr>
+<td>Spec</td>
+<td><code>CPUOffloadingSpec</code> / <code>TieringOffloadingSpec</code></td>
+<td>配置卸载目标和策略</td>
+</tr>
+<tr>
+<td>Manager</td>
+<td><code>OffloadingManager</code> + <code>OffloadingHandler</code></td>
+<td>LRU/ARC 追踪 + 异步传输引擎</td>
+</tr>
+</tbody>
+</table>
+<h3>CPU 卸载流程</h3>
+<ol>
+<li><strong>查找</strong>：<code>lookup(key)</code> 检查 block 是否已卸载到 CPU</li>
+<li><strong>加载</strong>：<code>prepare_load()</code> → 异步 CPU→GPU 传输</li>
+<li><strong>存储</strong>：<code>prepare_store()</code> → 异步 GPU→CPU 传输</li>
+<li><strong>驱逐</strong>：LRU/ARC 策略淘汰最久未用的 CPU 缓存条目</li>
+</ol>
+<h3>OffloadKey 设计</h3>
+<pre><code class="language-python">OffloadKey = NewType("OffloadKey", bytes)  # block_hash + group_idx
+</code></pre>
+<p>使用原始 bytes 避免 tuple GC 开销，通过 hash 值 + 组索引标识唯一 block。</p>
+<p><code>vllm/v1/kv_offload/base.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kv_connector</code></td>
+<td><code>None</code></td>
+<td>Connector 名称（如 <code>"NixlConnector"</code>）</td>
+</tr>
+<tr>
+<td><code>kv_role</code></td>
+<td><code>None</code></td>
+<td>角色：<code>kv_producer</code> / <code>kv_consumer</code> / <code>kv_both</code></td>
+</tr>
+<tr>
+<td><code>kv_parallel_size</code></td>
+<td>1</td>
+<td>并行实例数（P2pNccl 需 2）</td>
+</tr>
+<tr>
+<td><code>kv_buffer_device</code></td>
+<td>平台设备</td>
+<td>缓冲设备：<code>cuda</code> / <code>cpu</code></td>
+</tr>
+<tr>
+<td><code>kv_buffer_size</code></td>
+<td>1e9</td>
+<td>缓冲区大小（字节）</td>
+</tr>
+<tr>
+<td><code>kv_connector_extra_config</code></td>
+<td><code>{}</code></td>
+<td>Connector 特有配置</td>
+</tr>
+<tr>
+<td><code>kv_load_failure_policy</code></td>
+<td><code>"fail"</code></td>
+<td>加载失败策略：<code>fail</code> 或 <code>recompute</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/kv_transfer.py</code></p>
+</div>
+    </div>
+
+  </main>
+
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

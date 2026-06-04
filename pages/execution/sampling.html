@@ -1,0 +1,1306 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>采样与 Logits 处理 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="sampling">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>execution</span><span>/</span><span>采样与 Logits 处理</span></nav>
+
+    <div class="topic-content" id="topic-content">
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>execution</span><span>intermediate</span><span class="status">draft</span><span>14 min</span></div>
+      <h1>采样与 Logits 处理</h1>
+      <p class="hero-text">从 logits 到 token 的完整路径：<span data-term="temperature" data-tip="控制采样概率分布的平坦程度，温度越低越倾向于高概率 token。">temperature</span> / top-k / top-p / min-p 采样策略、重复惩罚、bad words 过滤与 <span data-term="rejection sampler" data-tip="投机解码中验证 draft token 的核心模块，按概率比决定接受或拒绝。">rejection sampler</span> 的协作。</p>
+      <div class="tags"><span class="tag">Sampling</span><span class="tag">Temperature</span><span class="tag">Top-k</span><span class="tag">Top-p</span><span class="tag">Min-p</span><span class="tag">Penalties</span><span class="tag">Rejection Sampler</span></div>
+    </section>
+
+
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      
+<p>采样的本质：<strong>logits 经一系列变换后归一化为概率分布，再采样一个 token。</strong> 变换顺序至关重要——先惩罚、再屏蔽、再采样策略、最后采样。投机解码的 rejection sampler 在标准采样之外并行验证 draft token。</p>
+<pre class="diagram-raw"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Logits 处理</div>
+      <div class="engine-step-desc">penalties / bad words 屏蔽 / grammar bitmask</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">采样策略</div>
+      <div class="engine-step-desc">temperature → top-k → top-p → min-p 过滤</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Token 选择</div>
+      <div class="engine-step-desc">greedy / multinomial 采样，rejection sampler 验证</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="sampling-html"><p>采样流程分三个阶段：</p>
+<ol>
+<li>Logits 处理 — 应用 penalties（频率/重复/presence 惩罚）、bad words 屏蔽、grammar bitmask。</li>
+<li>采样策略 — 依次应用 temperature 缩放、top-k 过滤、top-p 过滤、min-p 过滤。</li>
+<li>Token 选择 — 执行 greedy 或 multinomial 采样，投机解码场景下 rejection sampler 验证 draft token。</li>
+</ol>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>采样流程总览</h2>
+      
+<p><code>Sampler.__call__</code> 实现从 logits 到 token 的完整流水线，严格按规范顺序执行各阶段变换。</p>
+<h3>规范执行顺序</h3>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+def __call__(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata):
+    # 1. Logprobs 捕获（可选）
+    if sampling_params.logprobs:
+        raw_logprobs = logits.log_softmax(dim=-1)
+    
+    # 2. 转换为 float32 保证数值精度
+    logits = logits.to(torch.float32)
+    
+    # 3. Allowed token ids 白名单屏蔽
+    if allowed_token_ids is not None:
+        logits = apply_token_ids_mask(logits, allowed_token_ids)
+    
+    # 4. Bad words 排除
+    if bad_words_ids is not None:
+        logits = apply_bad_words_mask(logits, bad_words_ids)
+    
+    # 5. Non-argmax-invariant logits processors
+    logits = apply_logits_processors(logits, non_argmax_invariant_processors)
+    
+    # 6. Penalties（repetition / frequency / presence）
+    logits = apply_penalties(logits, output_token_ids, prompt_token_ids)
+    
+    # 7. 采样
+    if not all_random:
+        # 7a. Greedy 采样
+        sampled_tokens = logits.argmax(dim=-1)
+    else:
+        # 7b. Temperature 缩放
+        logits = logits / temperature
+        # 7c. Argmax-invariant logits processors（min_p）
+        logits = apply_logits_processors(logits, argmax_invariant_processors)
+        # 7d. Top-k 和 Top-p
+        logits = apply_top_k_top_p(logits, top_k, top_p)
+        # 7e. 从概率分布采样
+        probs = logits.softmax(dim=-1)
+        sampled_tokens = multinomial(probs)
+        # 7f. 根据 temperature 选择 greedy 或 random
+        sampled_tokens = select_greedy_or_random(sampled_tokens, temperature)
+    
+    # 8. 收集 logprobs
+    if sampling_params.logprobs:
+        logprobs = gather_logprobs(raw_logprobs, sampled_tokens)
+    
+    # 9. 返回 SamplerOutput
+    return SamplerOutput(sampled_tokens, logprobs)
+</code></pre>
+<h3>各阶段数据形状</h3>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>输入形状</th>
+<th>输出形状</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>原始 logits</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>模型输出，float16/bfloat16</td>
+</tr>
+<tr>
+<td>float32 转换</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>保证 softmax 数值稳定</td>
+</tr>
+<tr>
+<td>Penalties 后</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>部分位置 logits 被修改</td>
+</tr>
+<tr>
+<td>Top-k/p 后</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>部分位置设为 -inf</td>
+</tr>
+<tr>
+<td>采样结果</td>
+<td><code>[num_seqs]</code></td>
+<td><code>[num_seqs]</code></td>
+<td>每个 seq 一个 token id</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Temperature 与 Top-k/Top-p</h2>
+      
+<p>Temperature 控制概率分布的"平坦程度"，Top-k 和 Top-p 进一步过滤候选 token。</p>
+<h3>Temperature 缩放</h3>
+<p>Temperature 通过缩放 logits 影响概率分布：</p>
+<pre><code>logits_scaled = logits / temperature
+probs = softmax(logits_scaled)
+</code></pre>
+<ul>
+<li><strong>temperature < 1</strong>：放大差异，高概率 token 更突出，趋向 greedy</li>
+<li><strong>temperature = 1</strong>：不改变分布</li>
+<li><strong>temperature > 1</strong>：平滑分布，低概率 token 机会增加，趋向均匀</li>
+</ul>
+<p>当 <code>temperature < 1e-5</code> 时，直接使用 greedy 采样，跳过所有随机采样逻辑。最小 temperature 被钳制到 0.01 以保证数值安全。</p>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+if temperature < 1e-5:
+    # Greedy 采样
+    return logits.argmax(dim=-1)
+temperature = max(temperature, 0.01)  # 数值安全下界
+</code></pre>
+<h3>Top-k 采样</h3>
+<p>Top-k 只保留概率最高的 k 个 token，其余设为 -inf：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+def apply_top_k(logits: torch.Tensor, k: int) -> torch.Tensor:
+    top_k_logits, _ = logits.topk(k, dim=-1)
+    threshold = top_k_logits[:, -1:]  # 第 k 大的值
+    mask = logits < threshold
+    logits[mask] = float('-inf')
+    return logits
+</code></pre>
+<ul>
+<li><code>top_k = -1</code>：不启用 top-k 过滤</li>
+<li><code>top_k = 1</code>：等价于 greedy</li>
+<li>典型值：40、50、100</li>
+</ul>
+<h3>Top-p (Nucleus) 采样</h3>
+<p>Top-p 保留累积概率达到 p 的最小 token 集合：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+def apply_top_p(logits: torch.Tensor, p: float) -> torch.Tensor:
+    sorted_logits, sorted_indices = logits.sort(descending=True, dim=-1)
+    cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+    
+    # 找到累积概率超过 p 的位置
+    sorted_mask = cumulative_probs > p
+    # 保证至少保留一个 token
+    sorted_mask[:, -1] = False
+    
+    # 将被过滤的位置设为 -inf
+    sorted_logits[sorted_mask] = float('-inf')
+    # 恢复原始顺序
+    return scatter_sorted_logits(sorted_logits, sorted_indices)
+</code></pre>
+<ul>
+<li><code>top_p = 1.0</code>：不启用 top-p 过滤</li>
+<li>典型值：0.9、0.95、0.99</li>
+<li><code>sorted_mask[:, -1] = False</code> 保证至少一个 token 存活</li>
+</ul>
+<h3>Top-k 与 Top-p 协作</h3>
+<p><strong>Top-k 先执行，Top-p 后执行</strong>。Top-k 先粗筛 k 个候选，Top-p 再在剩余候选中按累积概率过滤：</p>
+<pre><code>logits → top_k(k=50) → top_p(p=0.9) → softmax → sample
+</code></pre>
+<p>这种顺序避免 Top-p 在整个词表上排序，提高效率。</p>
+<h3>Triton 实现</h3>
+<p>当 batch size >= 8 时，vLLM 使用 Triton kernel 加速 top-k/top-p：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+if batch_size >= 8:
+    # 使用 Qrita 算法的 Triton 实现
+    return topk_topp_sampler_triton(logits, k, p)
+else:
+    # PyTorch 实现
+    return topk_topp_sampler_pytorch(logits, k, p)
+</code></pre>
+<p>FlashInfer 后端使用 rejection sampling 方法实现 top-k/top-p，避免排序操作。</p>
+<p><code>vllm/v1/sample/ops/topk_topp_sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Min-p 采样</h2>
+      
+<p>Min-p 是动态阈值策略，根据模型置信度自适应调整过滤强度。</p>
+<h3>核心原理</h3>
+<p>Min-p 过滤掉概率低于 <code>min_p × P(max_token)</code> 的 token：</p>
+<pre><code>threshold = min_p × P(token_max)
+保留 P(token) >= threshold 的 token
+</code></pre>
+<ul>
+<li><strong>高置信场景</strong>：<code>P(max_token)</code> 很大（如 0.8），threshold 高，激进过滤</li>
+<li><strong>低置信场景</strong>：<code>P(max_token)</code> 较小（如 0.3），threshold 低，保留更多候选</li>
+</ul>
+<h3>与 Top-p 的区别</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Top-p</th>
+<th>Min-p</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>阈值类型</td>
+<td>累积概率阈值</td>
+<td>相对概率阈值</td>
+</tr>
+<tr>
+<td>候选数量</td>
+<td>动态变化，保证累积概率</td>
+<td>动态变化，保证相对概率</td>
+</tr>
+<tr>
+<td>高置信时</td>
+<td>可能保留过多低概率 token</td>
+<td>激进过滤，只保留头部</td>
+</tr>
+<tr>
+<td>低置信时</td>
+<td>可能过早截断</td>
+<td>保留更多候选</td>
+</tr>
+</tbody>
+</table>
+<h3>Argmax-invariant 特性</h3>
+<p>Min-p 是 <strong>argmax-invariant</strong> 的：应用 min-p 后，argmax 结果不变。因此 min-p 在 temperature 缩放<strong>之后</strong>、top-k/top-p <strong>之前</strong>执行：</p>
+<pre><code>logits → penalties → temperature → min_p → top_k → top_p → sample
+</code></pre>
+<h3>Triton Kernel 实现</h3>
+<p>Min-p 的 Triton kernel 在 log-space 计算，避免 softmax：</p>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/builtin.py
+def apply_min_p(logits: torch.Tensor, min_p: float) -> torch.Tensor:
+    # 在 log-space 计算阈值
+    max_logit = logits.max(dim=-1, keepdim=True)
+    threshold_logit = max_logit + math.log(min_p)
+    
+    # 过滤低于阈值的 token
+    mask = logits < threshold_logit
+    logits[mask] = float('-inf')
+    return logits
+</code></pre>
+<p>典型值：<code>min_p = 0.05</code> ~ <code>0.1</code></p>
+<p><code>vllm/v1/sample/logits_processor/builtin.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Penalties（频率/重复/Presence）</h2>
+      
+<p>Penalties 通过修改已出现 token 的 logits 抑制重复。</p>
+<h3>Repetition Penalty</h3>
+<p>对已出现 token 的 logits 乘以惩罚系数：</p>
+<pre><code>if logit[i] > 0:
+    logit[i] = logit[i] / repetition_penalty
+else:
+    logit[i] = logit[i] * repetition_penalty
+</code></pre>
+<ul>
+<li><code>repetition_penalty = 1.0</code>：无惩罚</li>
+<li><code>repetition_penalty > 1.0</code>：惩罚重复（典型值 1.1 ~ 1.2）</li>
+<li>应用范围：<strong>prompt + output tokens</strong></li>
+</ul>
+<h3>Frequency Penalty</h3>
+<p>按 token 出现次数线性惩罚：</p>
+<pre><code>logit[i] = logit[i] - frequency_penalty × count(token_i in output)
+</code></pre>
+<ul>
+<li><code>frequency_penalty > 0</code>：惩罚重复</li>
+<li>应用范围：<strong>仅 output tokens</strong></li>
+</ul>
+<h3>Presence Penalty</h3>
+<p>只要 token 出现过就固定惩罚：</p>
+<pre><code>logit[i] = logit[i] - presence_penalty × (1 if token_i in output else 0)
+</code></pre>
+<ul>
+<li><code>presence_penalty > 0</code>：惩罚出现过</li>
+<li>应用范围：<strong>仅 output tokens</strong></li>
+</ul>
+<h3>三者对比</h3>
+<table>
+<thead>
+<tr>
+<th>Penalty</th>
+<th>数学形式</th>
+<th>应用范围</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Repetition</td>
+<td>乘法惩罚</td>
+<td>prompt + output</td>
+<td>强力抑制，适合长文本</td>
+</tr>
+<tr>
+<td>Frequency</td>
+<td>线性惩罚</td>
+<td>output only</td>
+<td>按次数递增惩罚</td>
+</tr>
+<tr>
+<td>Presence</td>
+<td>固定惩罚</td>
+<td>output only</td>
+<td>轻度抑制，鼓励多样性</td>
+</tr>
+</tbody>
+</table>
+<h3>执行顺序</h3>
+<p>Penalties 在 temperature 缩放<strong>之前</strong>执行（在 <code>apply_logits_processors</code> 中）：</p>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+# Penalties 属于 non-argmax-invariant processors
+logits = apply_penalties(logits, output_token_ids, prompt_token_ids)
+# 之后才应用 temperature
+logits = logits / temperature
+</code></pre>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Bad Words 过滤</h2>
+      
+<p>Bad words 过滤将指定 token 或 token 序列的概率强制置零。</p>
+<h3>匹配逻辑</h3>
+<p>Bad words 支持两种形式：</p>
+<ol>
+<li><strong>单 token</strong>：<code>[[token_id]]</code> — 直接屏蔽该 token</li>
+<li><strong>多 token 序列</strong>：<code>[[t1, t2, t3]]</code> — 只屏蔽<strong>最后一个</strong>会完成该序列的 token</li>
+</ol>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+def apply_bad_words_mask(logits, bad_words_ids, token_ids):
+    for bad_word in bad_words_ids:
+        if len(bad_word) == 1:
+            # 单 token：直接屏蔽
+            logits[:, bad_word[0]] = float('-inf')
+        else:
+            # 多 token：检查前缀是否匹配
+            prefix = bad_word[:-1]
+            last_token = bad_word[-1]
+            if token_ids.endswith(prefix):
+                logits[:, last_token] = float('-inf')
+</code></pre>
+<h3>上下文敏感匹配</h3>
+<p>多 token bad word 只在<strong>当前上下文会完成该序列时</strong>才屏蔽：</p>
+<ul>
+<li>Bad word: <code>["不", "好"]</code> (token ids: <code>[100, 200]</code>)</li>
+<li>当前输出: <code>["今天", "天气", "不"]</code></li>
+<li>下一个 token 如果是 <code>200</code>（"好"），则被屏蔽</li>
+<li>如果输出是 <code>["今天", "天气"]</code>，token <code>200</code> 不被屏蔽</li>
+</ul>
+<h3>前缀空格变体</h3>
+<p>Bad words 同时处理带前缀空格和不带前缀空格的 tokenization：</p>
+<pre><code class="language-python"># 假设 bad word 是 "bad"
+# 会同时屏蔽：
+# - "bad" (token_id: 1234)
+# - " bad" (token_id: 5678，带前缀空格)
+</code></pre>
+<h3>投机解码变体</h3>
+<p>在投机解码中，bad words 过滤对每个 draft position 独立应用：</p>
+<pre><code class="language-python"># vllm/v1/sample/rejection_sampler.py
+for draft_pos in range(num_draft_tokens):
+    apply_bad_words_mask(logits[draft_pos], bad_words_ids, 
+                         prefix_tokens + draft_tokens[:draft_pos])
+</code></pre>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Logits Processor 接口</h2>
+      
+<p>vLLM 提供可扩展的 logits processor 机制，允许自定义 logits 变换。</p>
+<h3>接口定义</h3>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/base.py
+class LogitsProcessor(ABC):
+    @abstractmethod
+    def apply(self, logits: torch.Tensor, 
+              sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        """应用 logits 变换"""
+        pass
+    
+    @abstractmethod
+    def is_argmax_invariant(self) -> bool:
+        """是否不影响 argmax 结果"""
+        pass
+    
+    def update_state(self, new_token_ids: list[int]) -> None:
+        """更新内部状态（如 min_tokens 计数）"""
+        pass
+</code></pre>
+<h3>Argmax-invariant 分类</h3>
+<p>Logits processors 分为两组：</p>
+<table>
+<thead>
+<tr>
+<th>组别</th>
+<th>执行时机</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Non-argmax-invariant</td>
+<td>temperature 之前</td>
+<td>min_tokens, logit_bias, penalties</td>
+</tr>
+<tr>
+<td>Argmax-invariant</td>
+<td>temperature 之后</td>
+<td>min_p</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Argmax-invariant</strong> 的 processor 不改变 argmax 结果，可以在 temperature 缩放后执行而不影响 greedy 采样的正确性。</p>
+<h3>内置 Processors</h3>
+<table>
+<thead>
+<tr>
+<th>Processor</th>
+<th>功能</th>
+<th>Argmax-invariant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MinTokensLogitsProcessor</code></td>
+<td>强制生成 min_tokens 个 token</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>LogitBiasLogitsProcessor</code></td>
+<td>对特定 token 加偏置</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>MinPLogitsProcessor</code></td>
+<td>Min-p 过滤</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h3>自定义 Processor</h3>
+<p>通过三种方式注册自定义 processor：</p>
+<ol>
+<li><strong>插件注册</strong>：</li>
+</ol>
+<pre><code class="language-python">from vllm.plugins import register_logits_processor
+register_logits_processor("my_processor", MyLogitsProcessor)
+</code></pre>
+<ol start="2">
+<li><strong>FQCN 字符串</strong>：</li>
+</ol>
+<pre><code class="language-python">sampling_params.logits_processors = ["my_module.MyLogitsProcessor"]
+</code></pre>
+<ol start="3">
+<li><strong>直接传入类型</strong>：</li>
+</ol>
+<pre><code class="language-python">sampling_params.logits_processors = [MyLogitsProcessor]
+</code></pre>
+<h3>AdapterLogitsProcessor</h3>
+<p><code>AdapterLogitsProcessor</code> 包装 per-request 的 processors：</p>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/adapter.py
+class AdapterLogitsProcessor(LogitsProcessor):
+    def __init__(self, processors: list[LogitsProcessor]):
+        self.processors = processors
+    
+    def apply(self, logits, metadata):
+        for processor in self.processors:
+            logits = processor.apply(logits, metadata)
+        return logits
+</code></pre>
+<p><code>vllm/v1/sample/logits_processor/builtin.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>与投机解码的协作</h2>
+      
+<p>投机解码中，标准采样器与 rejection sampler 协同工作。</p>
+<h3>Rejection Sampler 算法</h3>
+<p>Rejection sampler 基于 Leviathan et al. 2023 的算法验证 draft token：</p>
+<pre><code>对于每个 draft token x:
+    计算 P_target(x) 和 P_draft(x)
+    如果 P_target(x) / P_draft(x) >= uniform_random(0, 1):
+        接受 x
+    否则:
+        拒绝 x，从 max(0, P_target - P_draft) 采样恢复 token
+        停止验证
+如果所有 draft token 都被接受:
+    从 P_target 采样一个 bonus token
+</code></pre>
+<h3>三种输出类型</h3>
+<table>
+<thead>
+<tr>
+<th>输出类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Accepted draft tokens</td>
+<td>通过验证的 draft token</td>
+</tr>
+<tr>
+<td>Recovered token</td>
+<td>拒绝后从调整分布采样的 token</td>
+</tr>
+<tr>
+<td>Bonus token</td>
+<td>全部接受后额外采样的 token</td>
+</tr>
+</tbody>
+</table>
+<h3>Greedy 场景</h3>
+<p>当 temperature = 0（greedy）时，验证简化为：</p>
+<pre><code class="language-python"># vllm/v1/sample/rejection_sampler.py
+if draft_token_id == target_argmax_id:
+    accept(draft_token)
+else:
+    reject_and_output(target_argmax_id)
+</code></pre>
+<h3>Gumbel-max 技巧</h3>
+<p>随机采样使用 Gumbel-max trick 的等价形式：</p>
+<pre><code class="language-python"># 标准 rejection sampling
+accept if P_target(x) / P_draft(x) >= uniform_random
+
+# Gumbel-max 等价形式
+probs_adjusted = P_target / exponential_noise
+sampled = argmax(probs_adjusted)
+</code></pre>
+<p>Gumbel-max 避免显式计算概率比，提高数值稳定性。</p>
+<h3>采样器准备的 Logits</h3>
+<p>为支持 rejection sampling，采样器需要准备：</p>
+<ol>
+<li><strong>Target logits</strong>：对 draft token 位置的 logits</li>
+<li><strong>Bonus logits</strong>：最后一个 draft token 之后的 logits</li>
+</ol>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+# 投机解码场景
+target_logits = logits[:num_draft_positions]
+bonus_logits = logits[num_draft_positions]
+</code></pre>
+<p><code>vllm/v1/sample/rejection_sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>temperature</code></td>
+<td>1.0</td>
+<td>采样温度，< 1e-5 使用 greedy</td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td>-1</td>
+<td>Top-k 值，-1 不启用</td>
+</tr>
+<tr>
+<td><code>top_p</code></td>
+<td>1.0</td>
+<td>Top-p 值，1.0 不启用</td>
+</tr>
+<tr>
+<td><code>min_p</code></td>
+<td>0.0</td>
+<td>Min-p 值，0.0 不启用</td>
+</tr>
+<tr>
+<td><code>repetition_penalty</code></td>
+<td>1.0</td>
+<td>重复惩罚系数</td>
+</tr>
+<tr>
+<td><code>frequency_penalty</code></td>
+<td>0.0</td>
+<td>频率惩罚</td>
+</tr>
+<tr>
+<td><code>presence_penalty</code></td>
+<td>0.0</td>
+<td>存在惩罚</td>
+</tr>
+<tr>
+<td><code>logprobs</code></td>
+<td>None</td>
+<td>返回 top-N logprobs</td>
+</tr>
+<tr>
+<td><code>prompt_logprobs</code></td>
+<td>None</td>
+<td>返回 prompt 的 logprobs</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>采样的本质：<strong>logits 经一系列变换后归一化为概率分布，再采样一个 token。</strong> 变换顺序至关重要——先惩罚、再屏蔽、再采样策略、最后采样。投机解码的 rejection sampler 在标准采样之外并行验证 draft token。</p>
+<pre><code class="language-html"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Logits 处理</div>
+      <div class="engine-step-desc">penalties / bad words 屏蔽 / grammar bitmask</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">采样策略</div>
+      <div class="engine-step-desc">temperature → top-k → top-p → min-p 过滤</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Token 选择</div>
+      <div class="engine-step-desc">greedy / multinomial 采样，rejection sampler 验证</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>采样流程分三个阶段：</p>
+<ol>
+<li>Logits 处理 — 应用 penalties（频率/重复/presence 惩罚）、bad words 屏蔽、grammar bitmask。</li>
+<li>采样策略 — 依次应用 temperature 缩放、top-k 过滤、top-p 过滤、min-p 过滤。</li>
+<li>Token 选择 — 执行 greedy 或 multinomial 采样，投机解码场景下 rejection sampler 验证 draft token。</li>
+</ol>
+<h2>采样流程总览</h2>
+<p><code>Sampler.__call__</code> 实现从 logits 到 token 的完整流水线，严格按规范顺序执行各阶段变换。</p>
+<h3>规范执行顺序</h3>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+def __call__(self, logits: torch.Tensor, sampling_metadata: SamplingMetadata):
+    # 1. Logprobs 捕获（可选）
+    if sampling_params.logprobs:
+        raw_logprobs = logits.log_softmax(dim=-1)
+    
+    # 2. 转换为 float32 保证数值精度
+    logits = logits.to(torch.float32)
+    
+    # 3. Allowed token ids 白名单屏蔽
+    if allowed_token_ids is not None:
+        logits = apply_token_ids_mask(logits, allowed_token_ids)
+    
+    # 4. Bad words 排除
+    if bad_words_ids is not None:
+        logits = apply_bad_words_mask(logits, bad_words_ids)
+    
+    # 5. Non-argmax-invariant logits processors
+    logits = apply_logits_processors(logits, non_argmax_invariant_processors)
+    
+    # 6. Penalties（repetition / frequency / presence）
+    logits = apply_penalties(logits, output_token_ids, prompt_token_ids)
+    
+    # 7. 采样
+    if not all_random:
+        # 7a. Greedy 采样
+        sampled_tokens = logits.argmax(dim=-1)
+    else:
+        # 7b. Temperature 缩放
+        logits = logits / temperature
+        # 7c. Argmax-invariant logits processors（min_p）
+        logits = apply_logits_processors(logits, argmax_invariant_processors)
+        # 7d. Top-k 和 Top-p
+        logits = apply_top_k_top_p(logits, top_k, top_p)
+        # 7e. 从概率分布采样
+        probs = logits.softmax(dim=-1)
+        sampled_tokens = multinomial(probs)
+        # 7f. 根据 temperature 选择 greedy 或 random
+        sampled_tokens = select_greedy_or_random(sampled_tokens, temperature)
+    
+    # 8. 收集 logprobs
+    if sampling_params.logprobs:
+        logprobs = gather_logprobs(raw_logprobs, sampled_tokens)
+    
+    # 9. 返回 SamplerOutput
+    return SamplerOutput(sampled_tokens, logprobs)
+</code></pre>
+<h3>各阶段数据形状</h3>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>输入形状</th>
+<th>输出形状</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>原始 logits</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>模型输出，float16/bfloat16</td>
+</tr>
+<tr>
+<td>float32 转换</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>保证 softmax 数值稳定</td>
+</tr>
+<tr>
+<td>Penalties 后</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>部分位置 logits 被修改</td>
+</tr>
+<tr>
+<td>Top-k/p 后</td>
+<td><code>[num_seqs, vocab_size]</code></td>
+<td>同上</td>
+<td>部分位置设为 -inf</td>
+</tr>
+<tr>
+<td>采样结果</td>
+<td><code>[num_seqs]</code></td>
+<td><code>[num_seqs]</code></td>
+<td>每个 seq 一个 token id</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+<h2>Temperature 与 Top-k/Top-p</h2>
+<p>Temperature 控制概率分布的"平坦程度"，Top-k 和 Top-p 进一步过滤候选 token。</p>
+<h3>Temperature 缩放</h3>
+<p>Temperature 通过缩放 logits 影响概率分布：</p>
+<pre><code>logits_scaled = logits / temperature
+probs = softmax(logits_scaled)
+</code></pre>
+<ul>
+<li><strong>temperature < 1</strong>：放大差异，高概率 token 更突出，趋向 greedy</li>
+<li><strong>temperature = 1</strong>：不改变分布</li>
+<li><strong>temperature > 1</strong>：平滑分布，低概率 token 机会增加，趋向均匀</li>
+</ul>
+<p>当 <code>temperature < 1e-5</code> 时，直接使用 greedy 采样，跳过所有随机采样逻辑。最小 temperature 被钳制到 0.01 以保证数值安全。</p>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+if temperature < 1e-5:
+    # Greedy 采样
+    return logits.argmax(dim=-1)
+temperature = max(temperature, 0.01)  # 数值安全下界
+</code></pre>
+<h3>Top-k 采样</h3>
+<p>Top-k 只保留概率最高的 k 个 token，其余设为 -inf：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+def apply_top_k(logits: torch.Tensor, k: int) -> torch.Tensor:
+    top_k_logits, _ = logits.topk(k, dim=-1)
+    threshold = top_k_logits[:, -1:]  # 第 k 大的值
+    mask = logits < threshold
+    logits[mask] = float('-inf')
+    return logits
+</code></pre>
+<ul>
+<li><code>top_k = -1</code>：不启用 top-k 过滤</li>
+<li><code>top_k = 1</code>：等价于 greedy</li>
+<li>典型值：40、50、100</li>
+</ul>
+<h3>Top-p (Nucleus) 采样</h3>
+<p>Top-p 保留累积概率达到 p 的最小 token 集合：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+def apply_top_p(logits: torch.Tensor, p: float) -> torch.Tensor:
+    sorted_logits, sorted_indices = logits.sort(descending=True, dim=-1)
+    cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+    
+    # 找到累积概率超过 p 的位置
+    sorted_mask = cumulative_probs > p
+    # 保证至少保留一个 token
+    sorted_mask[:, -1] = False
+    
+    # 将被过滤的位置设为 -inf
+    sorted_logits[sorted_mask] = float('-inf')
+    # 恢复原始顺序
+    return scatter_sorted_logits(sorted_logits, sorted_indices)
+</code></pre>
+<ul>
+<li><code>top_p = 1.0</code>：不启用 top-p 过滤</li>
+<li>典型值：0.9、0.95、0.99</li>
+<li><code>sorted_mask[:, -1] = False</code> 保证至少一个 token 存活</li>
+</ul>
+<h3>Top-k 与 Top-p 协作</h3>
+<p><strong>Top-k 先执行，Top-p 后执行</strong>。Top-k 先粗筛 k 个候选，Top-p 再在剩余候选中按累积概率过滤：</p>
+<pre><code>logits → top_k(k=50) → top_p(p=0.9) → softmax → sample
+</code></pre>
+<p>这种顺序避免 Top-p 在整个词表上排序，提高效率。</p>
+<h3>Triton 实现</h3>
+<p>当 batch size >= 8 时，vLLM 使用 Triton kernel 加速 top-k/top-p：</p>
+<pre><code class="language-python"># vllm/v1/sample/ops/topk_topp_sampler.py
+if batch_size >= 8:
+    # 使用 Qrita 算法的 Triton 实现
+    return topk_topp_sampler_triton(logits, k, p)
+else:
+    # PyTorch 实现
+    return topk_topp_sampler_pytorch(logits, k, p)
+</code></pre>
+<p>FlashInfer 后端使用 rejection sampling 方法实现 top-k/top-p，避免排序操作。</p>
+<p><code>vllm/v1/sample/ops/topk_topp_sampler.py</code></p>
+<h2>Min-p 采样</h2>
+<p>Min-p 是动态阈值策略，根据模型置信度自适应调整过滤强度。</p>
+<h3>核心原理</h3>
+<p>Min-p 过滤掉概率低于 <code>min_p × P(max_token)</code> 的 token：</p>
+<pre><code>threshold = min_p × P(token_max)
+保留 P(token) >= threshold 的 token
+</code></pre>
+<ul>
+<li><strong>高置信场景</strong>：<code>P(max_token)</code> 很大（如 0.8），threshold 高，激进过滤</li>
+<li><strong>低置信场景</strong>：<code>P(max_token)</code> 较小（如 0.3），threshold 低，保留更多候选</li>
+</ul>
+<h3>与 Top-p 的区别</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Top-p</th>
+<th>Min-p</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>阈值类型</td>
+<td>累积概率阈值</td>
+<td>相对概率阈值</td>
+</tr>
+<tr>
+<td>候选数量</td>
+<td>动态变化，保证累积概率</td>
+<td>动态变化，保证相对概率</td>
+</tr>
+<tr>
+<td>高置信时</td>
+<td>可能保留过多低概率 token</td>
+<td>激进过滤，只保留头部</td>
+</tr>
+<tr>
+<td>低置信时</td>
+<td>可能过早截断</td>
+<td>保留更多候选</td>
+</tr>
+</tbody>
+</table>
+<h3>Argmax-invariant 特性</h3>
+<p>Min-p 是 <strong>argmax-invariant</strong> 的：应用 min-p 后，argmax 结果不变。因此 min-p 在 temperature 缩放<strong>之后</strong>、top-k/top-p <strong>之前</strong>执行：</p>
+<pre><code>logits → penalties → temperature → min_p → top_k → top_p → sample
+</code></pre>
+<h3>Triton Kernel 实现</h3>
+<p>Min-p 的 Triton kernel 在 log-space 计算，避免 softmax：</p>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/builtin.py
+def apply_min_p(logits: torch.Tensor, min_p: float) -> torch.Tensor:
+    # 在 log-space 计算阈值
+    max_logit = logits.max(dim=-1, keepdim=True)
+    threshold_logit = max_logit + math.log(min_p)
+    
+    # 过滤低于阈值的 token
+    mask = logits < threshold_logit
+    logits[mask] = float('-inf')
+    return logits
+</code></pre>
+<p>典型值：<code>min_p = 0.05</code> ~ <code>0.1</code></p>
+<p><code>vllm/v1/sample/logits_processor/builtin.py</code></p>
+<h2>Penalties（频率/重复/Presence）</h2>
+<p>Penalties 通过修改已出现 token 的 logits 抑制重复。</p>
+<h3>Repetition Penalty</h3>
+<p>对已出现 token 的 logits 乘以惩罚系数：</p>
+<pre><code>if logit[i] > 0:
+    logit[i] = logit[i] / repetition_penalty
+else:
+    logit[i] = logit[i] * repetition_penalty
+</code></pre>
+<ul>
+<li><code>repetition_penalty = 1.0</code>：无惩罚</li>
+<li><code>repetition_penalty > 1.0</code>：惩罚重复（典型值 1.1 ~ 1.2）</li>
+<li>应用范围：<strong>prompt + output tokens</strong></li>
+</ul>
+<h3>Frequency Penalty</h3>
+<p>按 token 出现次数线性惩罚：</p>
+<pre><code>logit[i] = logit[i] - frequency_penalty × count(token_i in output)
+</code></pre>
+<ul>
+<li><code>frequency_penalty > 0</code>：惩罚重复</li>
+<li>应用范围：<strong>仅 output tokens</strong></li>
+</ul>
+<h3>Presence Penalty</h3>
+<p>只要 token 出现过就固定惩罚：</p>
+<pre><code>logit[i] = logit[i] - presence_penalty × (1 if token_i in output else 0)
+</code></pre>
+<ul>
+<li><code>presence_penalty > 0</code>：惩罚出现过</li>
+<li>应用范围：<strong>仅 output tokens</strong></li>
+</ul>
+<h3>三者对比</h3>
+<table>
+<thead>
+<tr>
+<th>Penalty</th>
+<th>数学形式</th>
+<th>应用范围</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Repetition</td>
+<td>乘法惩罚</td>
+<td>prompt + output</td>
+<td>强力抑制，适合长文本</td>
+</tr>
+<tr>
+<td>Frequency</td>
+<td>线性惩罚</td>
+<td>output only</td>
+<td>按次数递增惩罚</td>
+</tr>
+<tr>
+<td>Presence</td>
+<td>固定惩罚</td>
+<td>output only</td>
+<td>轻度抑制，鼓励多样性</td>
+</tr>
+</tbody>
+</table>
+<h3>执行顺序</h3>
+<p>Penalties 在 temperature 缩放<strong>之前</strong>执行（在 <code>apply_logits_processors</code> 中）：</p>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+# Penalties 属于 non-argmax-invariant processors
+logits = apply_penalties(logits, output_token_ids, prompt_token_ids)
+# 之后才应用 temperature
+logits = logits / temperature
+</code></pre>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+<h2>Bad Words 过滤</h2>
+<p>Bad words 过滤将指定 token 或 token 序列的概率强制置零。</p>
+<h3>匹配逻辑</h3>
+<p>Bad words 支持两种形式：</p>
+<ol>
+<li><strong>单 token</strong>：<code>[[token_id]]</code> — 直接屏蔽该 token</li>
+<li><strong>多 token 序列</strong>：<code>[[t1, t2, t3]]</code> — 只屏蔽<strong>最后一个</strong>会完成该序列的 token</li>
+</ol>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+def apply_bad_words_mask(logits, bad_words_ids, token_ids):
+    for bad_word in bad_words_ids:
+        if len(bad_word) == 1:
+            # 单 token：直接屏蔽
+            logits[:, bad_word[0]] = float('-inf')
+        else:
+            # 多 token：检查前缀是否匹配
+            prefix = bad_word[:-1]
+            last_token = bad_word[-1]
+            if token_ids.endswith(prefix):
+                logits[:, last_token] = float('-inf')
+</code></pre>
+<h3>上下文敏感匹配</h3>
+<p>多 token bad word 只在<strong>当前上下文会完成该序列时</strong>才屏蔽：</p>
+<ul>
+<li>Bad word: <code>["不", "好"]</code> (token ids: <code>[100, 200]</code>)</li>
+<li>当前输出: <code>["今天", "天气", "不"]</code></li>
+<li>下一个 token 如果是 <code>200</code>（"好"），则被屏蔽</li>
+<li>如果输出是 <code>["今天", "天气"]</code>，token <code>200</code> 不被屏蔽</li>
+</ul>
+<h3>前缀空格变体</h3>
+<p>Bad words 同时处理带前缀空格和不带前缀空格的 tokenization：</p>
+<pre><code class="language-python"># 假设 bad word 是 "bad"
+# 会同时屏蔽：
+# - "bad" (token_id: 1234)
+# - " bad" (token_id: 5678，带前缀空格)
+</code></pre>
+<h3>投机解码变体</h3>
+<p>在投机解码中，bad words 过滤对每个 draft position 独立应用：</p>
+<pre><code class="language-python"># vllm/v1/sample/rejection_sampler.py
+for draft_pos in range(num_draft_tokens):
+    apply_bad_words_mask(logits[draft_pos], bad_words_ids, 
+                         prefix_tokens + draft_tokens[:draft_pos])
+</code></pre>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+<h2>Logits Processor 接口</h2>
+<p>vLLM 提供可扩展的 logits processor 机制，允许自定义 logits 变换。</p>
+<h3>接口定义</h3>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/base.py
+class LogitsProcessor(ABC):
+    @abstractmethod
+    def apply(self, logits: torch.Tensor, 
+              sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        """应用 logits 变换"""
+        pass
+    
+    @abstractmethod
+    def is_argmax_invariant(self) -> bool:
+        """是否不影响 argmax 结果"""
+        pass
+    
+    def update_state(self, new_token_ids: list[int]) -> None:
+        """更新内部状态（如 min_tokens 计数）"""
+        pass
+</code></pre>
+<h3>Argmax-invariant 分类</h3>
+<p>Logits processors 分为两组：</p>
+<table>
+<thead>
+<tr>
+<th>组别</th>
+<th>执行时机</th>
+<th>示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Non-argmax-invariant</td>
+<td>temperature 之前</td>
+<td>min_tokens, logit_bias, penalties</td>
+</tr>
+<tr>
+<td>Argmax-invariant</td>
+<td>temperature 之后</td>
+<td>min_p</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Argmax-invariant</strong> 的 processor 不改变 argmax 结果，可以在 temperature 缩放后执行而不影响 greedy 采样的正确性。</p>
+<h3>内置 Processors</h3>
+<table>
+<thead>
+<tr>
+<th>Processor</th>
+<th>功能</th>
+<th>Argmax-invariant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MinTokensLogitsProcessor</code></td>
+<td>强制生成 min_tokens 个 token</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>LogitBiasLogitsProcessor</code></td>
+<td>对特定 token 加偏置</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>MinPLogitsProcessor</code></td>
+<td>Min-p 过滤</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h3>自定义 Processor</h3>
+<p>通过三种方式注册自定义 processor：</p>
+<ol>
+<li><strong>插件注册</strong>：</li>
+</ol>
+<pre><code class="language-python">from vllm.plugins import register_logits_processor
+register_logits_processor("my_processor", MyLogitsProcessor)
+</code></pre>
+<ol start="2">
+<li><strong>FQCN 字符串</strong>：</li>
+</ol>
+<pre><code class="language-python">sampling_params.logits_processors = ["my_module.MyLogitsProcessor"]
+</code></pre>
+<ol start="3">
+<li><strong>直接传入类型</strong>：</li>
+</ol>
+<pre><code class="language-python">sampling_params.logits_processors = [MyLogitsProcessor]
+</code></pre>
+<h3>AdapterLogitsProcessor</h3>
+<p><code>AdapterLogitsProcessor</code> 包装 per-request 的 processors：</p>
+<pre><code class="language-python"># vllm/v1/sample/logits_processor/adapter.py
+class AdapterLogitsProcessor(LogitsProcessor):
+    def __init__(self, processors: list[LogitsProcessor]):
+        self.processors = processors
+    
+    def apply(self, logits, metadata):
+        for processor in self.processors:
+            logits = processor.apply(logits, metadata)
+        return logits
+</code></pre>
+<p><code>vllm/v1/sample/logits_processor/builtin.py</code></p>
+<h2>与投机解码的协作</h2>
+<p>投机解码中，标准采样器与 rejection sampler 协同工作。</p>
+<h3>Rejection Sampler 算法</h3>
+<p>Rejection sampler 基于 Leviathan et al. 2023 的算法验证 draft token：</p>
+<pre><code>对于每个 draft token x:
+    计算 P_target(x) 和 P_draft(x)
+    如果 P_target(x) / P_draft(x) >= uniform_random(0, 1):
+        接受 x
+    否则:
+        拒绝 x，从 max(0, P_target - P_draft) 采样恢复 token
+        停止验证
+如果所有 draft token 都被接受:
+    从 P_target 采样一个 bonus token
+</code></pre>
+<h3>三种输出类型</h3>
+<table>
+<thead>
+<tr>
+<th>输出类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Accepted draft tokens</td>
+<td>通过验证的 draft token</td>
+</tr>
+<tr>
+<td>Recovered token</td>
+<td>拒绝后从调整分布采样的 token</td>
+</tr>
+<tr>
+<td>Bonus token</td>
+<td>全部接受后额外采样的 token</td>
+</tr>
+</tbody>
+</table>
+<h3>Greedy 场景</h3>
+<p>当 temperature = 0（greedy）时，验证简化为：</p>
+<pre><code class="language-python"># vllm/v1/sample/rejection_sampler.py
+if draft_token_id == target_argmax_id:
+    accept(draft_token)
+else:
+    reject_and_output(target_argmax_id)
+</code></pre>
+<h3>Gumbel-max 技巧</h3>
+<p>随机采样使用 Gumbel-max trick 的等价形式：</p>
+<pre><code class="language-python"># 标准 rejection sampling
+accept if P_target(x) / P_draft(x) >= uniform_random
+
+# Gumbel-max 等价形式
+probs_adjusted = P_target / exponential_noise
+sampled = argmax(probs_adjusted)
+</code></pre>
+<p>Gumbel-max 避免显式计算概率比，提高数值稳定性。</p>
+<h3>采样器准备的 Logits</h3>
+<p>为支持 rejection sampling，采样器需要准备：</p>
+<ol>
+<li><strong>Target logits</strong>：对 draft token 位置的 logits</li>
+<li><strong>Bonus logits</strong>：最后一个 draft token 之后的 logits</li>
+</ol>
+<pre><code class="language-python"># vllm/v1/sample/sampler.py
+# 投机解码场景
+target_logits = logits[:num_draft_positions]
+bonus_logits = logits[num_draft_positions]
+</code></pre>
+<p><code>vllm/v1/sample/rejection_sampler.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>temperature</code></td>
+<td>1.0</td>
+<td>采样温度，< 1e-5 使用 greedy</td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td>-1</td>
+<td>Top-k 值，-1 不启用</td>
+</tr>
+<tr>
+<td><code>top_p</code></td>
+<td>1.0</td>
+<td>Top-p 值，1.0 不启用</td>
+</tr>
+<tr>
+<td><code>min_p</code></td>
+<td>0.0</td>
+<td>Min-p 值，0.0 不启用</td>
+</tr>
+<tr>
+<td><code>repetition_penalty</code></td>
+<td>1.0</td>
+<td>重复惩罚系数</td>
+</tr>
+<tr>
+<td><code>frequency_penalty</code></td>
+<td>0.0</td>
+<td>频率惩罚</td>
+</tr>
+<tr>
+<td><code>presence_penalty</code></td>
+<td>0.0</td>
+<td>存在惩罚</td>
+</tr>
+<tr>
+<td><code>logprobs</code></td>
+<td>None</td>
+<td>返回 top-N logprobs</td>
+</tr>
+<tr>
+<td><code>prompt_logprobs</code></td>
+<td>None</td>
+<td>返回 prompt 的 logprobs</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/sample/sampler.py</code></p>
+</div>
+    </div>
+
+  </main>
+
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

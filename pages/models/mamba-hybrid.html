@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mamba 混合架构 - vLLM Visual Guide</title>
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="../../assets/css/layout.css">
+  <link rel="stylesheet" href="../../assets/css/components.css">
+  <link rel="stylesheet" href="../../assets/css/animations.css">
+</head>
+<body data-page-id="mamba-hybrid">
+  <header class="site-header">
+    <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
+  </header>
+  <main class="topic-page">
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>models</span><span>/</span><span>Mamba 混合架构</span></nav>
+
+    <div class="topic-content" id="topic-content">
+    <section class="topic-hero panel">
+      <div class="card-meta"><span>models</span><span>advanced</span><span class="status">draft</span><span>12 min</span></div>
+      <h1>Mamba 混合架构</h1>
+      <p class="hero-text">Mamba SSM 与 Attention 混合架构：<span data-term="SSM 层" data-tip="状态空间模型层，通过线性递推处理序列，无 KV cache 开销。">SSM 层</span> 处理局部依赖、Attention 处理全局依赖，Jamba/Bamba 等模型在 vLLM 中的混合 KV cache 管理。</p>
+      <div class="tags"><span class="tag">Mamba</span><span class="tag">SSM</span><span class="tag">Hybrid</span><span class="tag">Attention</span><span class="tag">Jamba</span></div>
+    </section>
+
+
+
+    <section class="panel">
+      <h2>心智模型</h2>
+      
+<p>想象你在整理一份超长文档。传统 Attention 就像每次都要从头翻阅整份文档（O(N²) 复杂度），文档越长越慢。Mamba SSM 则像边读边记笔记，只保留关键状态，读到哪里处理到哪里（O(N) 复杂度），但可能漏掉远处的关联。</p>
+<p>混合架构的思路：<strong>用 SSM 处理局部细节，用 Attention 捕获全局关联</strong>。就像读书时大部分内容快速扫过（SSM），遇到关键章节停下来仔细回顾前后文（Attention）。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-box">Input</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc">
+<div class="arch-proc-title">Mamba SSM</div>
+<div class="arch-proc-sub">局部依赖 · O(N)</div>
+</div>
+<div class="arch-arrow">↔</div>
+<div class="arch-proc arch-highlight">
+<div class="arch-proc-title">Attention</div>
+<div class="arch-proc-sub">全局依赖 · O(N²)</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-box">Output</div>
+</div>
+<div class="arch-label">Hybrid: SSM 处理长序列局部信息，Attention 捕获全局关联</div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="mamba-hybrid-mental-model-html"><p>混合架构心智模型示意图。输入经过两种层的交替处理：</p>
+<p><strong>Mamba SSM 层</strong>：处理局部依赖，复杂度 O(N)，无 KV cache 开销。就像边读边记笔记，只保留固定大小的状态，适合处理长序列的局部信息。</p>
+<p><strong>Attention 层</strong>：捕获全局依赖，复杂度 O(N²)，需要 KV cache。就像停下来仔细回顾前后文，能建立远距离的关联，但开销随序列长度平方增长。</p>
+<p>混合架构的核心思路：大部分层用 SSM 快速处理，少量关键层用 Attention 建立全局关联。这样既保持了长序列处理能力，又控制了计算开销。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Mamba SSM 原理</h2>
+      
+<h3>选择性状态空间模型</h3>
+<p>传统状态空间模型（SSM）的参数是固定的，对所有输入一视同仁。Mamba 的核心创新是<strong>选择性状态空间</strong>：参数 B、C、Δ 依赖于输入。</p>
+<pre><code class="language-python">h_t = A * h_{t-1} + B(x_t) * x_t
+y_t = C(x_t) * h_t
+</code></pre>
+<p>其中 A 是状态转移矩阵，B(x_t)、C(x_t)、Δ(x_t) 都由当前输入 x_t 决定。这让模型能<strong>选择性地记住或遗忘信息</strong>——重要的内容保留在状态里，不重要的快速衰减。</p>
+<h3>硬件感知算法</h3>
+<p>Mamba 的训练效率来自两个关键设计：</p>
+<p><strong>并行扫描（Parallel Scan）</strong>：训练时，序列的所有 token 可以并行处理，而不是像 RNN 那样必须串行。这利用了 GPU 的并行能力。</p>
+<p><strong>递归模式（Recurrent Mode）</strong>：推理时，可以像 RNN 一样逐 token 递推，只维护固定大小的状态，不需要存储所有历史。</p>
+<h3>线性复杂度 vs Attention 的平方复杂度</h3>
+<table>
+<thead>
+<tr>
+<th>机制</th>
+<th>复杂度</th>
+<th>内存占用</th>
+<th>长序列能力</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attention</td>
+<td>O(N²)</td>
+<td>O(N) KV cache</td>
+<td>受限于显存</td>
+</tr>
+<tr>
+<td>Mamba SSM</td>
+<td>O(N)</td>
+<td>O(1) 固定状态</td>
+<td>理论无限长</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键优势</strong>：SSM 的状态大小是固定的，不随序列长度增长。处理 1K token 和 1M token，状态占用一样多。这让 Mamba 天然适合长上下文场景。</p>
+<h3>无 KV Cache 的代价</h3>
+<p>SSM 层不需要 KV cache，但代价是<strong>无法随机访问历史</strong>。Attention 可以直接跳到任意位置读取 KV，SSM 必须从头递推到当前位置。这就是为什么纯 SSM 模型在需要"回头看"的任务上表现不佳——混合架构正是为了解决这个问题。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Mamba + Attention 混合层</h2>
+      
+<h3>交替排列策略</h3>
+<p>混合模型的核心设计是<strong>层类型交替</strong>：大部分层是 SSM，少量层是 Attention。典型模式：</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L0</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L1</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L2</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc arch-highlight" style="min-width: 60px;">
+<div class="arch-proc-title">L3</div>
+<div class="arch-proc-sub">Attn</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L4</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L5</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc arch-highlight" style="min-width: 60px;">
+<div class="arch-proc-title">L6</div>
+<div class="arch-proc-sub">Attn</div>
+</div>
+</div>
+<div class="arch-label">典型模式：每 N 层 SSM 后插入 1 层 Attention</div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="mamba-layer-pattern-html"><p>混合层排列模式示意图。展示典型的层类型交替策略：</p>
+<ul>
+<li>L0、L1、L2：SSM 层，处理局部依赖</li>
+<li>L3：Attention 层，建立全局关联</li>
+<li>L4、L5：SSM 层</li>
+<li>L6：Attention 层</li>
+</ul>
+<p>典型模式是每 N 层 SSM 后插入 1 层 Attention。Jamba 的设计是每 4-5 层 Mamba 后有 1 层 Attention，部分层还结合 MoE。这样大部分计算是高效的 SSM，少量 Attention 层负责"回头看"建立远距离关联。</p>
+<p>不同模型的排列比例不同：Jamba 更激进（SSM 占比高），Bamba 更保守（Attention 占比稍高）。</p>
+</template>
+<h3>为什么这样设计有效？</h3>
+<p><strong>局部依赖占主导</strong>：语言模型的大部分计算是局部上下文（相邻词、短语结构），SSM 能高效处理。</p>
+<p><strong>全局关联稀疏但关键</strong>：长距离依赖（指代消解、篇章结构）虽然稀疏，但对理解至关重要。少量 Attention 层足以捕获这些关联。</p>
+<p><strong>显存效率</strong>：假设 32 层模型，只有 4 层是 Attention，KV cache 只需要纯 Attention 模型的 1/8。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Hybrid KV Cache 管理</h2>
+      
+<h3>问题：不同层需要不同的缓存</h3>
+<p>混合模型面临一个新挑战：SSM 层不需要 KV cache，Attention 层需要。vLLM 通过 <strong>AttentionSpec</strong> 类型系统来区分：</p>
+<table>
+<thead>
+<tr>
+<th>AttentionSpec 类型</th>
+<th>对应层</th>
+<th>KV cache 需求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FullAttentionSpec</code></td>
+<td>标准 Attention</td>
+<td>完整 KV cache</td>
+</tr>
+<tr>
+<td><code>MambaSpec</code></td>
+<td>Mamba SSM</td>
+<td>无 KV cache，固定状态</td>
+</tr>
+<tr>
+<td><code>SlidingWindowAttentionSpec</code></td>
+<td>滑动窗口 Attention</td>
+<td>有限 KV cache</td>
+</tr>
+</tbody>
+</table>
+<h3>HybridKVCacheCoordinator</h3>
+<p>当模型有多种 attention 类型时，vLLM 使用 <code>HybridKVCacheCoordinator</code> 管理：</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-proc" style="min-width: 180px;">
+<div class="arch-proc-title">HybridKVCacheCoordinator</div>
+<div class="arch-proc-sub">混合缓存协调器</div>
+</div>
+<div class="arch-arrow">↓</div>
+</div>
+<div class="arch-row">
+<div class="arch-proc arch-highlight" style="min-width: 120px;">
+<div class="arch-proc-title">Group 0</div>
+<div class="arch-proc-sub">Full Attention<br>block_size=16</div>
+</div>
+<div class="arch-proc" style="min-width: 120px;">
+<div class="arch-proc-title">Group 1</div>
+<div class="arch-proc-sub">Mamba SSM<br>无 KV cache</div>
+</div>
+<div class="arch-proc" style="min-width: 120px;">
+<div class="arch-proc-title">Group 2</div>
+<div class="arch-proc-sub">Sliding Window<br>block_size=8</div>
+</div>
+</div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="mamba-kv-coordinator-html"><p>HybridKVCacheCoordinator 管理示意图。混合缓存协调器管理多个 KV cache group，每个 group 对应一种 attention 类型：</p>
+<p><strong>Group 0 - Full Attention</strong>：标准全注意力层，需要完整 KV cache，block_size=16。</p>
+<p><strong>Group 1 - Mamba SSM</strong>：SSM 层，不需要 KV cache，只维护固定大小的状态。这个 group 在 KV cache 管理中是"空"的。</p>
+<p><strong>Group 2 - Sliding Window</strong>：滑动窗口注意力层，需要有限 KV cache（只保留最近 N 个 token），block_size=8。</p>
+<p>协调器的核心挑战：不同 group 的 block_size 不同，缓存命中长度必须是所有 block_size 的最小公倍数（LCM）的倍数，哈希粒度是最大公约数（GCD）。</p>
+</template>
+<h3>Block Size 的数学约束</h3>
+<p>不同 attention 类型可能有不同的 block_size。缓存命中必须满足所有 group 的对齐要求：</p>
+<pre><code class="language-python">cache_hit_length = LCM(block_size_group0, block_size_group1, ...)
+hash_granularity = GCD(block_size_group0, block_size_group1, ...)
+</code></pre>
+<p>例如：Group 0 的 block_size=16，Group 2 的 block_size=8，则缓存命中长度必须是 16 的倍数（LCM(16,8)=16），哈希粒度是 8（GCD(16,8)=8）。</p>
+<h3>SSM 层的状态管理</h3>
+<p>SSM 层虽然不需要 KV cache，但需要维护状态。vLLM 的处理方式：</p>
+<p><strong>Prefill 阶段</strong>：并行计算所有 token 的状态，最后保留最终状态。</p>
+<p><strong>Decode 阶段</strong>：逐 token 递推更新状态，状态大小固定。</p>
+<p>状态存储在模型内部，不通过 KV cache 接口管理。这意味着 SSM 层的"缓存"对调度器透明——调度器只关心 Attention 层的 KV cache。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>主要混合模型</h2>
+      
+<h3>Jamba（AI21）</h3>
+<p>Jamba 是首个大规模 Mamba-Attention-MoE 混合模型：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总层数</td>
+<td>32 层</td>
+</tr>
+<tr>
+<td>Mamba 层</td>
+<td>大部分（约 24 层）</td>
+</tr>
+<tr>
+<td>Attention 层</td>
+<td>每 4-5 层插入 1 层（约 6-8 层）</td>
+</tr>
+<tr>
+<td>MoE</td>
+<td>部分层使用 MoE FFN</td>
+</tr>
+<tr>
+<td>上下文长度</td>
+<td>支持 256K token</td>
+</tr>
+</tbody>
+</table>
+<p><strong>核心优势</strong>：Mamba 层处理长序列，Attention 层建立全局关联，MoE 降低 FFN 计算量。三者结合实现了长上下文 + 高效率。</p>
+<h3>Bamba（IBM）</h3>
+<p>Bamba 是 IBM 的简化混合架构：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>架构</td>
+<td>Mamba + Attention（无 MoE）</td>
+</tr>
+<tr>
+<td>目标</td>
+<td>高效长上下文推理</td>
+</tr>
+<tr>
+<td>特点</td>
+<td>更简单的训练和部署</td>
+</tr>
+</tbody>
+</table>
+<p>Bamba 去掉了 MoE，专注于 SSM + Attention 的混合，适合需要稳定性和可预测性的生产场景。</p>
+<h3>GraniteMoeHybrid（IBM）</h3>
+<p>IBM 的 MoE + Mamba 混合：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>架构</td>
+<td>MoE FFN + Mamba SSM</td>
+</tr>
+<tr>
+<td>特点</td>
+<td>稀疏专家路由 + SSM 效率</td>
+</tr>
+<tr>
+<td>适用</td>
+<td>需要大参数量但低推理成本</td>
+</tr>
+</tbody>
+</table>
+<p>结合了 MoE 的参数效率和 SSM 的序列效率，适合需要大模型能力但资源受限的场景。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<p>Mamba 混合模型在 vLLM 中<strong>无需特殊 CLI 标志</strong>，模型配置自动检测混合架构：</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>模型 config</td>
+<td>自动声明各层的 attention 类型（FullAttention/Mamba/SlidingWindow）</td>
+</tr>
+<tr>
+<td>KV cache 布局</td>
+<td>自动根据 attention 类型分组，HybridKVCacheCoordinator 管理</td>
+</tr>
+<tr>
+<td>block_size</td>
+<td>各 group 可不同，协调器自动计算 LCM/GCD</td>
+</tr>
+</tbody>
+</table>
+<h3>调优建议</h3>
+<p><strong>长上下文场景</strong>：优先选择 Mamba 占比高的模型（如 Jamba），SSM 层不占用额外显存。</p>
+<p><strong>需要精确回溯</strong>：选择 Attention 占比稍高的模型，确保足够的全局关联能力。</p>
+<p><strong>显存受限</strong>：混合模型比纯 Attention 模型节省大量 KV cache，可支持更长上下文或更大 batch size。</p>
+<p><code>vllm/v1/kv_cache_interface.py</code>
+<code>vllm/model_executor/models/mamba.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象你在整理一份超长文档。传统 Attention 就像每次都要从头翻阅整份文档（O(N²) 复杂度），文档越长越慢。Mamba SSM 则像边读边记笔记，只保留关键状态，读到哪里处理到哪里（O(N) 复杂度），但可能漏掉远处的关联。</p>
+<p>混合架构的思路：<strong>用 SSM 处理局部细节，用 Attention 捕获全局关联</strong>。就像读书时大部分内容快速扫过（SSM），遇到关键章节停下来仔细回顾前后文（Attention）。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-box">Input</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc">
+<div class="arch-proc-title">Mamba SSM</div>
+<div class="arch-proc-sub">局部依赖 · O(N)</div>
+</div>
+<div class="arch-arrow">↔</div>
+<div class="arch-proc arch-highlight">
+<div class="arch-proc-title">Attention</div>
+<div class="arch-proc-sub">全局依赖 · O(N²)</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-box">Output</div>
+</div>
+<div class="arch-label">Hybrid: SSM 处理长序列局部信息，Attention 捕获全局关联</div>
+</div>
+</code></pre>
+<p>混合架构心智模型示意图。输入经过两种层的交替处理：</p>
+<p><strong>Mamba SSM 层</strong>：处理局部依赖，复杂度 O(N)，无 KV cache 开销。就像边读边记笔记，只保留固定大小的状态，适合处理长序列的局部信息。</p>
+<p><strong>Attention 层</strong>：捕获全局依赖，复杂度 O(N²)，需要 KV cache。就像停下来仔细回顾前后文，能建立远距离的关联，但开销随序列长度平方增长。</p>
+<p>混合架构的核心思路：大部分层用 SSM 快速处理，少量关键层用 Attention 建立全局关联。这样既保持了长序列处理能力，又控制了计算开销。</p>
+<h2>Mamba SSM 原理</h2>
+<h3>选择性状态空间模型</h3>
+<p>传统状态空间模型（SSM）的参数是固定的，对所有输入一视同仁。Mamba 的核心创新是<strong>选择性状态空间</strong>：参数 B、C、Δ 依赖于输入。</p>
+<pre><code class="language-python">h_t = A * h_{t-1} + B(x_t) * x_t
+y_t = C(x_t) * h_t
+</code></pre>
+<p>其中 A 是状态转移矩阵，B(x_t)、C(x_t)、Δ(x_t) 都由当前输入 x_t 决定。这让模型能<strong>选择性地记住或遗忘信息</strong>——重要的内容保留在状态里，不重要的快速衰减。</p>
+<h3>硬件感知算法</h3>
+<p>Mamba 的训练效率来自两个关键设计：</p>
+<p><strong>并行扫描（Parallel Scan）</strong>：训练时，序列的所有 token 可以并行处理，而不是像 RNN 那样必须串行。这利用了 GPU 的并行能力。</p>
+<p><strong>递归模式（Recurrent Mode）</strong>：推理时，可以像 RNN 一样逐 token 递推，只维护固定大小的状态，不需要存储所有历史。</p>
+<h3>线性复杂度 vs Attention 的平方复杂度</h3>
+<table>
+<thead>
+<tr>
+<th>机制</th>
+<th>复杂度</th>
+<th>内存占用</th>
+<th>长序列能力</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attention</td>
+<td>O(N²)</td>
+<td>O(N) KV cache</td>
+<td>受限于显存</td>
+</tr>
+<tr>
+<td>Mamba SSM</td>
+<td>O(N)</td>
+<td>O(1) 固定状态</td>
+<td>理论无限长</td>
+</tr>
+</tbody>
+</table>
+<p><strong>关键优势</strong>：SSM 的状态大小是固定的，不随序列长度增长。处理 1K token 和 1M token，状态占用一样多。这让 Mamba 天然适合长上下文场景。</p>
+<h3>无 KV Cache 的代价</h3>
+<p>SSM 层不需要 KV cache，但代价是<strong>无法随机访问历史</strong>。Attention 可以直接跳到任意位置读取 KV，SSM 必须从头递推到当前位置。这就是为什么纯 SSM 模型在需要"回头看"的任务上表现不佳——混合架构正是为了解决这个问题。</p>
+<h2>Mamba + Attention 混合层</h2>
+<h3>交替排列策略</h3>
+<p>混合模型的核心设计是<strong>层类型交替</strong>：大部分层是 SSM，少量层是 Attention。典型模式：</p>
+<pre><code class="language-html"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L0</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L1</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L2</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc arch-highlight" style="min-width: 60px;">
+<div class="arch-proc-title">L3</div>
+<div class="arch-proc-sub">Attn</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L4</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc" style="min-width: 60px;">
+<div class="arch-proc-title">L5</div>
+<div class="arch-proc-sub">SSM</div>
+</div>
+<div class="arch-arrow">→</div>
+<div class="arch-proc arch-highlight" style="min-width: 60px;">
+<div class="arch-proc-title">L6</div>
+<div class="arch-proc-sub">Attn</div>
+</div>
+</div>
+<div class="arch-label">典型模式：每 N 层 SSM 后插入 1 层 Attention</div>
+</div>
+</code></pre>
+<p>混合层排列模式示意图。展示典型的层类型交替策略：</p>
+<ul>
+<li>L0、L1、L2：SSM 层，处理局部依赖</li>
+<li>L3：Attention 层，建立全局关联</li>
+<li>L4、L5：SSM 层</li>
+<li>L6：Attention 层</li>
+</ul>
+<p>典型模式是每 N 层 SSM 后插入 1 层 Attention。Jamba 的设计是每 4-5 层 Mamba 后有 1 层 Attention，部分层还结合 MoE。这样大部分计算是高效的 SSM，少量 Attention 层负责"回头看"建立远距离关联。</p>
+<p>不同模型的排列比例不同：Jamba 更激进（SSM 占比高），Bamba 更保守（Attention 占比稍高）。</p>
+<h3>为什么这样设计有效？</h3>
+<p><strong>局部依赖占主导</strong>：语言模型的大部分计算是局部上下文（相邻词、短语结构），SSM 能高效处理。</p>
+<p><strong>全局关联稀疏但关键</strong>：长距离依赖（指代消解、篇章结构）虽然稀疏，但对理解至关重要。少量 Attention 层足以捕获这些关联。</p>
+<p><strong>显存效率</strong>：假设 32 层模型，只有 4 层是 Attention，KV cache 只需要纯 Attention 模型的 1/8。</p>
+<h2>Hybrid KV Cache 管理</h2>
+<h3>问题：不同层需要不同的缓存</h3>
+<p>混合模型面临一个新挑战：SSM 层不需要 KV cache，Attention 层需要。vLLM 通过 <strong>AttentionSpec</strong> 类型系统来区分：</p>
+<table>
+<thead>
+<tr>
+<th>AttentionSpec 类型</th>
+<th>对应层</th>
+<th>KV cache 需求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FullAttentionSpec</code></td>
+<td>标准 Attention</td>
+<td>完整 KV cache</td>
+</tr>
+<tr>
+<td><code>MambaSpec</code></td>
+<td>Mamba SSM</td>
+<td>无 KV cache，固定状态</td>
+</tr>
+<tr>
+<td><code>SlidingWindowAttentionSpec</code></td>
+<td>滑动窗口 Attention</td>
+<td>有限 KV cache</td>
+</tr>
+</tbody>
+</table>
+<h3>HybridKVCacheCoordinator</h3>
+<p>当模型有多种 attention 类型时，vLLM 使用 <code>HybridKVCacheCoordinator</code> 管理：</p>
+<pre><code class="language-html"><div class="arch-diagram">
+<div class="arch-row">
+<div class="arch-proc" style="min-width: 180px;">
+<div class="arch-proc-title">HybridKVCacheCoordinator</div>
+<div class="arch-proc-sub">混合缓存协调器</div>
+</div>
+<div class="arch-arrow">↓</div>
+</div>
+<div class="arch-row">
+<div class="arch-proc arch-highlight" style="min-width: 120px;">
+<div class="arch-proc-title">Group 0</div>
+<div class="arch-proc-sub">Full Attention<br>block_size=16</div>
+</div>
+<div class="arch-proc" style="min-width: 120px;">
+<div class="arch-proc-title">Group 1</div>
+<div class="arch-proc-sub">Mamba SSM<br>无 KV cache</div>
+</div>
+<div class="arch-proc" style="min-width: 120px;">
+<div class="arch-proc-title">Group 2</div>
+<div class="arch-proc-sub">Sliding Window<br>block_size=8</div>
+</div>
+</div>
+</div>
+</code></pre>
+<p>HybridKVCacheCoordinator 管理示意图。混合缓存协调器管理多个 KV cache group，每个 group 对应一种 attention 类型：</p>
+<p><strong>Group 0 - Full Attention</strong>：标准全注意力层，需要完整 KV cache，block_size=16。</p>
+<p><strong>Group 1 - Mamba SSM</strong>：SSM 层，不需要 KV cache，只维护固定大小的状态。这个 group 在 KV cache 管理中是"空"的。</p>
+<p><strong>Group 2 - Sliding Window</strong>：滑动窗口注意力层，需要有限 KV cache（只保留最近 N 个 token），block_size=8。</p>
+<p>协调器的核心挑战：不同 group 的 block_size 不同，缓存命中长度必须是所有 block_size 的最小公倍数（LCM）的倍数，哈希粒度是最大公约数（GCD）。</p>
+<h3>Block Size 的数学约束</h3>
+<p>不同 attention 类型可能有不同的 block_size。缓存命中必须满足所有 group 的对齐要求：</p>
+<pre><code class="language-python">cache_hit_length = LCM(block_size_group0, block_size_group1, ...)
+hash_granularity = GCD(block_size_group0, block_size_group1, ...)
+</code></pre>
+<p>例如：Group 0 的 block_size=16，Group 2 的 block_size=8，则缓存命中长度必须是 16 的倍数（LCM(16,8)=16），哈希粒度是 8（GCD(16,8)=8）。</p>
+<h3>SSM 层的状态管理</h3>
+<p>SSM 层虽然不需要 KV cache，但需要维护状态。vLLM 的处理方式：</p>
+<p><strong>Prefill 阶段</strong>：并行计算所有 token 的状态，最后保留最终状态。</p>
+<p><strong>Decode 阶段</strong>：逐 token 递推更新状态，状态大小固定。</p>
+<p>状态存储在模型内部，不通过 KV cache 接口管理。这意味着 SSM 层的"缓存"对调度器透明——调度器只关心 Attention 层的 KV cache。</p>
+<h2>主要混合模型</h2>
+<h3>Jamba（AI21）</h3>
+<p>Jamba 是首个大规模 Mamba-Attention-MoE 混合模型：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总层数</td>
+<td>32 层</td>
+</tr>
+<tr>
+<td>Mamba 层</td>
+<td>大部分（约 24 层）</td>
+</tr>
+<tr>
+<td>Attention 层</td>
+<td>每 4-5 层插入 1 层（约 6-8 层）</td>
+</tr>
+<tr>
+<td>MoE</td>
+<td>部分层使用 MoE FFN</td>
+</tr>
+<tr>
+<td>上下文长度</td>
+<td>支持 256K token</td>
+</tr>
+</tbody>
+</table>
+<p><strong>核心优势</strong>：Mamba 层处理长序列，Attention 层建立全局关联，MoE 降低 FFN 计算量。三者结合实现了长上下文 + 高效率。</p>
+<h3>Bamba（IBM）</h3>
+<p>Bamba 是 IBM 的简化混合架构：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>架构</td>
+<td>Mamba + Attention（无 MoE）</td>
+</tr>
+<tr>
+<td>目标</td>
+<td>高效长上下文推理</td>
+</tr>
+<tr>
+<td>特点</td>
+<td>更简单的训练和部署</td>
+</tr>
+</tbody>
+</table>
+<p>Bamba 去掉了 MoE，专注于 SSM + Attention 的混合，适合需要稳定性和可预测性的生产场景。</p>
+<h3>GraniteMoeHybrid（IBM）</h3>
+<p>IBM 的 MoE + Mamba 混合：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>设计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>架构</td>
+<td>MoE FFN + Mamba SSM</td>
+</tr>
+<tr>
+<td>特点</td>
+<td>稀疏专家路由 + SSM 效率</td>
+</tr>
+<tr>
+<td>适用</td>
+<td>需要大参数量但低推理成本</td>
+</tr>
+</tbody>
+</table>
+<p>结合了 MoE 的参数效率和 SSM 的序列效率，适合需要大模型能力但资源受限的场景。</p>
+<h2>关键配置</h2>
+<p>Mamba 混合模型在 vLLM 中<strong>无需特殊 CLI 标志</strong>，模型配置自动检测混合架构：</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>模型 config</td>
+<td>自动声明各层的 attention 类型（FullAttention/Mamba/SlidingWindow）</td>
+</tr>
+<tr>
+<td>KV cache 布局</td>
+<td>自动根据 attention 类型分组，HybridKVCacheCoordinator 管理</td>
+</tr>
+<tr>
+<td>block_size</td>
+<td>各 group 可不同，协调器自动计算 LCM/GCD</td>
+</tr>
+</tbody>
+</table>
+<h3>调优建议</h3>
+<p><strong>长上下文场景</strong>：优先选择 Mamba 占比高的模型（如 Jamba），SSM 层不占用额外显存。</p>
+<p><strong>需要精确回溯</strong>：选择 Attention 占比稍高的模型，确保足够的全局关联能力。</p>
+<p><strong>显存受限</strong>：混合模型比纯 Attention 模型节省大量 KV cache，可支持更长上下文或更大 batch size。</p>
+<p><code>vllm/v1/kv_cache_interface.py</code>
+<code>vllm/model_executor/models/mamba.py</code></p>
+</div>
+    </div>
+
+  </main>
+
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

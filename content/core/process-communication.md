@@ -1,7 +1,7 @@
 ---
 id: process-communication
 title: 进程与通信
-category: distributed
+category: core
 level: intermediate
 status: ready
 readingMinutes: 22
