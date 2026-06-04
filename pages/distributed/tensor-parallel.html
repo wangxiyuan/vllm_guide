@@ -12,27 +12,781 @@
 <body data-page-id="tensor-parallel">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>distributed</span><span>/</span><span>Tensor Parallel</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">todo</span><span>12 min</span></div>
+      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">draft</span><span>12 min</span></div>
       <h1>Tensor Parallel</h1>
-      <p class="hero-text">张量切分、all-reduce 与 all-gather 的可视化</p>
+      <p class="hero-text">权重沿 output/input 维度切分到多个 GPU，forward 中通过 <span data-term="all-reduce" data-tip="将所有 GPU 上的部分和归约到完整结果。">all-reduce</span> / <span data-term="all-gather" data-tip="将所有 GPU 上的分片拼接为完整张量。">all-gather</span> 协作完成计算。</p>
       <div class="tags"><span class="tag">Tensor Parallel</span><span class="tag">All Reduce</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/tensor-parallel-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象一个巨大的矩阵乘法 <strong>Y = XA</strong>，其中 A 是权重矩阵。TP 的核心思想是把 A 切分成多块，每个 GPU 计算一部分，然后通过通信合并结果。</p>
+<p><strong>Column Parallel</strong>：把 A 按列切分，每个 GPU 持有若干列。计算后得到部分输出，需要 all-gather 拼接完整输出。</p>
+<p><strong>Row Parallel</strong>：把 A 按行切分，每个 GPU 持有若干行。计算后得到部分和，需要 all-reduce 求和得到完整输出。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Column Parallel</div>
+    <div class="arch-proc-sub">按列切分权重</div>
+    <div class="arch-row">
+      <div class="arch-box">X [B, K]</div>
+      <div class="arch-box">×</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-highlight">A[:, 0:2]</div>
+      <div class="arch-box arch-highlight">A[:, 2:4]</div>
+      <div class="arch-box arch-highlight">A[:, 4:6]</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box">=</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-module">Y[:, 0:2]</div>
+      <div class="arch-box arch-module">Y[:, 2:4]</div>
+      <div class="arch-box arch-module">Y[:, 4:6]</div>
+    </div>
+    <div class="arch-flow-label">all-gather → 完整 Y</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Row Parallel</div>
+    <div class="arch-proc-sub">按行切分权重</div>
+    <div class="arch-row">
+      <div class="arch-box">X [B, K]</div>
+      <div class="arch-box">×</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-highlight">A[0:2, :]</div>
+      <div class="arch-box arch-highlight">A[2:4, :]</div>
+      <div class="arch-box arch-highlight">A[4:6, :]</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box">=</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-module">Y_partial[0]</div>
+      <div class="arch-box arch-module">Y_partial[1]</div>
+      <div class="arch-box arch-module">Y_partial[2]</div>
+    </div>
+    <div class="arch-flow-label">all-reduce → 完整 Y</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="tp-concept"><p>Tensor Parallel 的两种切分方式：</p>
+<p><strong>Column Parallel</strong>：权重矩阵按列切分，每个 GPU 持有若干列。输入 X 在所有 GPU 上复制，每个 GPU 计算部分输出列。通过 all-gather 将所有 GPU 的输出列拼接为完整输出。</p>
+<p><strong>Row Parallel</strong>：权重矩阵按行切分，每个 GPU 持有若干行。输入 X 也按对应维度切分，每个 GPU 计算部分和。通过 all-reduce 将所有 GPU 的部分和归约为完整输出。</p>
+<p>关键区别：Column Parallel 输出需要拼接（all-gather），Row Parallel 输出需要求和（all-reduce）。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>线性层切分方式</h2>
+      
+<p>vLLM 提供四种 TP 线性层，对应不同的切分策略：</p>
+<table>
+<thead>
+<tr>
+<th>层类型</th>
+<th>切分维度</th>
+<th>Forward 通信</th>
+<th>典型用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ColumnParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>QKV 投影、up_proj</td>
+</tr>
+<tr>
+<td>RowParallelLinear</td>
+<td>input 维度</td>
+<td>all-reduce</td>
+<td>o_proj、down_proj</td>
+</tr>
+<tr>
+<td>MergedColumnParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>gate_up_proj（合并 gate 和 up）</td>
+</tr>
+<tr>
+<td>QKVParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>QKV 投影（处理 GQA）</td>
+</tr>
+</tbody>
+</table>
+<pre class="diagram-raw"><div class="comm-layers">
+  <div class="comm-layer">
+    <div class="comm-layer-title">ColumnParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">W[:, 0:N/tp]</div>
+      <div class="comm-item">X @ W_shard → Y_shard</div>
+      <div class="comm-item">gather_output=True 时 all-gather</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">RowParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">W[0:N/tp, :]</div>
+      <div class="comm-item">X_shard @ W_shard → Y_partial</div>
+      <div class="comm-item">all-reduce</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">MergedColumnParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">[W_gate, W_up][:, 0:N/tp]</div>
+      <div class="comm-item">X @ [W_gate, W_up]_shard</div>
+      <div class="comm-item">gather_output=True 时 all-gather</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">QKVParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">[W_q, W_k, W_v][:, 0:N/tp]</div>
+      <div class="comm-item">X @ [W_q, W_k, W_v]_shard</div>
+      <div class="comm-item">无通信</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="linear-layers"><p>四种 TP 线性层的切分方式：</p>
+<p><strong>ColumnParallelLinear</strong>：权重按 output 维度切分。每个 GPU 持有部分输出通道。<code>gather_output=True</code> 时 all-gather 拼接完整输出，否则输出保持切分状态。</p>
+<p><strong>RowParallelLinear</strong>：权重按 input 维度切分。每个 GPU 持有部分输入通道。<code>reduce_results=True</code> 时 all-reduce 合并部分和。</p>
+<p><strong>MergedColumnParallelLinear</strong>：将两个 Column Parallel 层合并（如 gate_proj 和 up_proj）。权重拼接后按 output 维度切分。<code>gather_output=True</code> 时 all-gather。</p>
+<p><strong>QKVParallelLinear</strong>：专门处理 QKV 投影，支持 GQA 的 KV head 复制。权重按 output 维度切分，自动处理 head 复制逻辑。<code>gather_output=True</code> 时 all-gather。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>典型 Transformer 层的 TP 通信</h2>
+      
+<p>一个 Transformer 层包含两次 all-reduce：</p>
+<pre class="diagram-raw"><div class="sched-flow">
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Attention</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">Input [B, S, H]</div>
+      <div class="sched-step">QKVParallelLinear <span class="muted">（无通信）</span></div>
+      <div class="sched-step">Attention <span class="muted">（无 TP 通信）</span></div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">all-reduce #1</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">o_proj (RowParallel)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="waiting">
+    <div class="sched-phase-title">Residual + FFN</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">residual + norm</div>
+      <div class="sched-step">MergedColumnParallel <span class="muted">（无通信）</span></div>
+      <div class="sched-step">activation (SiLU/SwiGLU)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">all-reduce #2</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">down_proj (RowParallel)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Output</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">residual + norm</div>
+      <div class="sched-step">Output [B, S, H]</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="transformer-tp-flow"><p>典型 Transformer 层的 TP 通信流程：</p>
+<p><strong>Attention 部分</strong>：</p>
+<ol>
+<li>QKVParallelLinear：无通信，输出已切分</li>
+<li>Attention 计算：每个 GPU 独立计算部分 head，无 TP 通信</li>
+<li>o_proj (RowParallel)：all-reduce 合并 attention 输出</li>
+</ol>
+<p><strong>FFN 部分</strong>：</p>
+<ol>
+<li>MergedColumnParallelLinear：无通信，gate 和 up 投影合并</li>
+<li>activation：每个 GPU 独立计算</li>
+<li>down_proj (RowParallel)：all-reduce 合并 FFN 输出</li>
+</ol>
+<p><strong>通信总结</strong>：每个 Transformer 层有 2 次 all-reduce，分别在 attention 和 FFN 的输出位置。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>GQA 的 KV 复制</h2>
+      
+<p>当 tp_size >= num_kv_heads 时，KV heads 会在 TP ranks 间复制：</p>
+<pre class="diagram-raw"><div class="kv-mental-model">
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">Config</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">num_q_heads = 32</div>
+        <div class="kv-ds-item">num_kv_heads = 8</div>
+        <div class="kv-ds-item">tp_size = 4</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 0</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 0-7, KV: 0-1 (replica 0)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 1</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 8-15, KV: 0-1 (replica 1)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 2</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 16-23, KV: 2-3 (replica 0)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 3</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 24-31, KV: 2-3 (replica 1)</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-ds">
+    <div class="kv-ds-title">Formula</div>
+    <div class="kv-ds-items">
+      <div class="kv-ds-item">replica_id = tp_rank // num_kv_head_replicas</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="gqa-kv-replica"><p>GQA (Grouped Query Attention) 的 KV head 复制机制：</p>
+<p><strong>复制原因</strong>：当 tp_size > num_kv_heads 时，每个 KV head 需要在多个 TP ranks 上复制，以匹配 Q heads 的分布。</p>
+<p><strong>复制公式</strong>：</p>
+<pre><code>num_kv_head_replicas = tp_size // (num_q_heads // num_kv_heads)
+replica_id = tp_rank // num_kv_head_replicas
+</code></pre>
+<p><strong>QKVParallelLinear 处理</strong>：自动检测 tp_size 和 num_kv_heads 的关系，正确切分 Q weights 并复制 KV weights。</p>
+<p><strong>示例</strong>：num_q_heads=32, num_kv_heads=8, tp_size=4 时，每个 TP rank 处理 8 个 Q heads，KV heads 被复制到 2 个 ranks。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>all-reduce 调用链</h2>
+      
+<p>RowParallelLinear 的 all-reduce 调用链：</p>
+<pre class="diagram-raw"><div class="kv-hash-chain">
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">RowParallelLinear.forward()</div>
+    <div class="kv-hash-block-detail">vllm/model_executor/layers/linear.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">tensor_model_parallel_all_reduce()</div>
+    <div class="kv-hash-block-detail">vllm/distributed/communication_op.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">CudaCommunicator.all_reduce()</div>
+    <div class="kv-hash-block-detail">vllm/distributed/device_communicators/cuda_communicator.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">Backend: NCCL / CUSTOM / FLASHINFER / SYMM_MEM / PYNCCL</div>
+    <div class="kv-hash-block-detail">根据配置选择</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="allreduce-chain"><p>all-reduce 从线性层到底层通信库的完整调用链：</p>
+<p><strong>调用流程</strong>：</p>
+<ol>
+<li>RowParallelLinear.forward() 检测到需要 all-reduce</li>
+<li>调用 tensor_model_parallel_all_reduce() 工具函数（<code>vllm/distributed/communication_op.py</code>）</li>
+<li>获取 TP group 的 GroupCoordinator</li>
+<li>调用注册的 custom op: torch.ops.vllm.all_reduce()</li>
+<li>CudaCommunicator 根据配置选择后端</li>
+<li>执行底层 NCCL 或其他通信库</li>
+</ol>
+<p><strong>后端选择</strong>：CudaCommunicator 根据配置和 GPU 能力自动选择后端，支持 NCCL、Custom All-Reduce（对称内存）、FlashInfer、Symmetric Memory、PyNCCL 等。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>TP 与 CUDA Graph</h2>
+      
+<p>TP 的集合通信操作需要特殊处理才能支持 CUDA Graph：</p>
+<pre class="diagram-raw"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">注册 Custom Op</div>
+      <div class="engine-step-desc">all-reduce/all-gather 注册为 torch custom op</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Graph Capture</div>
+      <div class="engine-step-desc">GroupCoordinator.graph_capture() 上下文管理器</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">记录通信模式</div>
+      <div class="engine-step-desc">记录每个通信操作的输入输出形状</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Replay</div>
+      <div class="engine-step-desc">CUDA Graph replay 时自动执行通信</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="tp-cudagraph"><p>TP 与 CUDA Graph 的兼容机制：</p>
+<p><strong>问题</strong>：CUDA Graph 需要记录固定的 GPU 操作序列，但 NCCL 集合通信是动态的，无法直接 capture。</p>
+<p><strong>解决方案</strong>：</p>
+<ol>
+<li>将 all-reduce/all-gather 注册为 PyTorch custom op</li>
+<li>使用 GroupCoordinator.graph_capture() 上下文管理器</li>
+<li>在 capture 阶段记录通信操作的元数据</li>
+<li>Replay 时根据记录的元数据执行通信</li>
+</ol>
+<p><strong>关键代码</strong>：<code>vllm/distributed/parallel_state.py</code> 中的 GroupCoordinator 类。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+<th>默认值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tensor-parallel-size</code></td>
+<td>TP 大小，权重切分 GPU 数</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>VLLM_ALL2ALL_BACKEND</code></td>
+<td>all-to-all 后端（EP 用）</td>
+<td>"naive"</td>
+</tr>
+<tr>
+<td><code>VLLM_USE_V1</code></td>
+<td>使用 V1 架构（影响 TP 实现）</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>VLLM_ATTENTION_BACKEND</code></td>
+<td>Attention 后端（影响 TP 通信）</td>
+<td>自动选择</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象一个巨大的矩阵乘法 <strong>Y = XA</strong>，其中 A 是权重矩阵。TP 的核心思想是把 A 切分成多块，每个 GPU 计算一部分，然后通过通信合并结果。</p>
+<p><strong>Column Parallel</strong>：把 A 按列切分，每个 GPU 持有若干列。计算后得到部分输出，需要 all-gather 拼接完整输出。</p>
+<p><strong>Row Parallel</strong>：把 A 按行切分，每个 GPU 持有若干行。计算后得到部分和，需要 all-reduce 求和得到完整输出。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Column Parallel</div>
+    <div class="arch-proc-sub">按列切分权重</div>
+    <div class="arch-row">
+      <div class="arch-box">X [B, K]</div>
+      <div class="arch-box">×</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-highlight">A[:, 0:2]</div>
+      <div class="arch-box arch-highlight">A[:, 2:4]</div>
+      <div class="arch-box arch-highlight">A[:, 4:6]</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box">=</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-module">Y[:, 0:2]</div>
+      <div class="arch-box arch-module">Y[:, 2:4]</div>
+      <div class="arch-box arch-module">Y[:, 4:6]</div>
+    </div>
+    <div class="arch-flow-label">all-gather → 完整 Y</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Row Parallel</div>
+    <div class="arch-proc-sub">按行切分权重</div>
+    <div class="arch-row">
+      <div class="arch-box">X [B, K]</div>
+      <div class="arch-box">×</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-highlight">A[0:2, :]</div>
+      <div class="arch-box arch-highlight">A[2:4, :]</div>
+      <div class="arch-box arch-highlight">A[4:6, :]</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box">=</div>
+    </div>
+    <div class="arch-row">
+      <div class="arch-box arch-module">Y_partial[0]</div>
+      <div class="arch-box arch-module">Y_partial[1]</div>
+      <div class="arch-box arch-module">Y_partial[2]</div>
+    </div>
+    <div class="arch-flow-label">all-reduce → 完整 Y</div>
+  </div>
+</div>
+</code></pre>
+<p>Tensor Parallel 的两种切分方式：</p>
+<p><strong>Column Parallel</strong>：权重矩阵按列切分，每个 GPU 持有若干列。输入 X 在所有 GPU 上复制，每个 GPU 计算部分输出列。通过 all-gather 将所有 GPU 的输出列拼接为完整输出。</p>
+<p><strong>Row Parallel</strong>：权重矩阵按行切分，每个 GPU 持有若干行。输入 X 也按对应维度切分，每个 GPU 计算部分和。通过 all-reduce 将所有 GPU 的部分和归约为完整输出。</p>
+<p>关键区别：Column Parallel 输出需要拼接（all-gather），Row Parallel 输出需要求和（all-reduce）。</p>
+<h2>线性层切分方式</h2>
+<p>vLLM 提供四种 TP 线性层，对应不同的切分策略：</p>
+<table>
+<thead>
+<tr>
+<th>层类型</th>
+<th>切分维度</th>
+<th>Forward 通信</th>
+<th>典型用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ColumnParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>QKV 投影、up_proj</td>
+</tr>
+<tr>
+<td>RowParallelLinear</td>
+<td>input 维度</td>
+<td>all-reduce</td>
+<td>o_proj、down_proj</td>
+</tr>
+<tr>
+<td>MergedColumnParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>gate_up_proj（合并 gate 和 up）</td>
+</tr>
+<tr>
+<td>QKVParallelLinear</td>
+<td>output 维度</td>
+<td>gather_output=True 时 all-gather</td>
+<td>QKV 投影（处理 GQA）</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-html"><div class="comm-layers">
+  <div class="comm-layer">
+    <div class="comm-layer-title">ColumnParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">W[:, 0:N/tp]</div>
+      <div class="comm-item">X @ W_shard → Y_shard</div>
+      <div class="comm-item">gather_output=True 时 all-gather</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">RowParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">W[0:N/tp, :]</div>
+      <div class="comm-item">X_shard @ W_shard → Y_partial</div>
+      <div class="comm-item">all-reduce</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">MergedColumnParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">[W_gate, W_up][:, 0:N/tp]</div>
+      <div class="comm-item">X @ [W_gate, W_up]_shard</div>
+      <div class="comm-item">gather_output=True 时 all-gather</div>
+    </div>
+  </div>
+  <div class="comm-layer">
+    <div class="comm-layer-title">QKVParallelLinear</div>
+    <div class="comm-layer-items">
+      <div class="comm-item">[W_q, W_k, W_v][:, 0:N/tp]</div>
+      <div class="comm-item">X @ [W_q, W_k, W_v]_shard</div>
+      <div class="comm-item">无通信</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>四种 TP 线性层的切分方式：</p>
+<p><strong>ColumnParallelLinear</strong>：权重按 output 维度切分。每个 GPU 持有部分输出通道。<code>gather_output=True</code> 时 all-gather 拼接完整输出，否则输出保持切分状态。</p>
+<p><strong>RowParallelLinear</strong>：权重按 input 维度切分。每个 GPU 持有部分输入通道。<code>reduce_results=True</code> 时 all-reduce 合并部分和。</p>
+<p><strong>MergedColumnParallelLinear</strong>：将两个 Column Parallel 层合并（如 gate_proj 和 up_proj）。权重拼接后按 output 维度切分。<code>gather_output=True</code> 时 all-gather。</p>
+<p><strong>QKVParallelLinear</strong>：专门处理 QKV 投影，支持 GQA 的 KV head 复制。权重按 output 维度切分，自动处理 head 复制逻辑。<code>gather_output=True</code> 时 all-gather。</p>
+<h2>典型 Transformer 层的 TP 通信</h2>
+<p>一个 Transformer 层包含两次 all-reduce：</p>
+<pre><code class="language-html"><div class="sched-flow">
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Attention</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">Input [B, S, H]</div>
+      <div class="sched-step">QKVParallelLinear <span class="muted">（无通信）</span></div>
+      <div class="sched-step">Attention <span class="muted">（无 TP 通信）</span></div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">all-reduce #1</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">o_proj (RowParallel)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="waiting">
+    <div class="sched-phase-title">Residual + FFN</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">residual + norm</div>
+      <div class="sched-step">MergedColumnParallel <span class="muted">（无通信）</span></div>
+      <div class="sched-step">activation (SiLU/SwiGLU)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">all-reduce #2</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">down_proj (RowParallel)</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Output</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">residual + norm</div>
+      <div class="sched-step">Output [B, S, H]</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>典型 Transformer 层的 TP 通信流程：</p>
+<p><strong>Attention 部分</strong>：</p>
+<ol>
+<li>QKVParallelLinear：无通信，输出已切分</li>
+<li>Attention 计算：每个 GPU 独立计算部分 head，无 TP 通信</li>
+<li>o_proj (RowParallel)：all-reduce 合并 attention 输出</li>
+</ol>
+<p><strong>FFN 部分</strong>：</p>
+<ol>
+<li>MergedColumnParallelLinear：无通信，gate 和 up 投影合并</li>
+<li>activation：每个 GPU 独立计算</li>
+<li>down_proj (RowParallel)：all-reduce 合并 FFN 输出</li>
+</ol>
+<p><strong>通信总结</strong>：每个 Transformer 层有 2 次 all-reduce，分别在 attention 和 FFN 的输出位置。</p>
+<h2>GQA 的 KV 复制</h2>
+<p>当 tp_size >= num_kv_heads 时，KV heads 会在 TP ranks 间复制：</p>
+<pre><code class="language-html"><div class="kv-mental-model">
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">Config</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">num_q_heads = 32</div>
+        <div class="kv-ds-item">num_kv_heads = 8</div>
+        <div class="kv-ds-item">tp_size = 4</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 0</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 0-7, KV: 0-1 (replica 0)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 1</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 8-15, KV: 0-1 (replica 1)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 2</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 16-23, KV: 2-3 (replica 0)</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">TP Rank 3</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">Q: 24-31, KV: 2-3 (replica 1)</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-ds">
+    <div class="kv-ds-title">Formula</div>
+    <div class="kv-ds-items">
+      <div class="kv-ds-item">replica_id = tp_rank // num_kv_head_replicas</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>GQA (Grouped Query Attention) 的 KV head 复制机制：</p>
+<p><strong>复制原因</strong>：当 tp_size > num_kv_heads 时，每个 KV head 需要在多个 TP ranks 上复制，以匹配 Q heads 的分布。</p>
+<p><strong>复制公式</strong>：</p>
+<pre><code>num_kv_head_replicas = tp_size // (num_q_heads // num_kv_heads)
+replica_id = tp_rank // num_kv_head_replicas
+</code></pre>
+<p><strong>QKVParallelLinear 处理</strong>：自动检测 tp_size 和 num_kv_heads 的关系，正确切分 Q weights 并复制 KV weights。</p>
+<p><strong>示例</strong>：num_q_heads=32, num_kv_heads=8, tp_size=4 时，每个 TP rank 处理 8 个 Q heads，KV heads 被复制到 2 个 ranks。</p>
+<h2>all-reduce 调用链</h2>
+<p>RowParallelLinear 的 all-reduce 调用链：</p>
+<pre><code class="language-html"><div class="kv-hash-chain">
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">RowParallelLinear.forward()</div>
+    <div class="kv-hash-block-detail">vllm/model_executor/layers/linear.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">tensor_model_parallel_all_reduce()</div>
+    <div class="kv-hash-block-detail">vllm/distributed/communication_op.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">CudaCommunicator.all_reduce()</div>
+    <div class="kv-hash-block-detail">vllm/distributed/device_communicators/cuda_communicator.py</div>
+  </div>
+  <div class="kv-hash-arrow">→</div>
+  <div class="kv-hash-block">
+    <div class="kv-hash-block-title">Backend: NCCL / CUSTOM / FLASHINFER / SYMM_MEM / PYNCCL</div>
+    <div class="kv-hash-block-detail">根据配置选择</div>
+  </div>
+</div>
+</code></pre>
+<p>all-reduce 从线性层到底层通信库的完整调用链：</p>
+<p><strong>调用流程</strong>：</p>
+<ol>
+<li>RowParallelLinear.forward() 检测到需要 all-reduce</li>
+<li>调用 tensor_model_parallel_all_reduce() 工具函数（<code>vllm/distributed/communication_op.py</code>）</li>
+<li>获取 TP group 的 GroupCoordinator</li>
+<li>调用注册的 custom op: torch.ops.vllm.all_reduce()</li>
+<li>CudaCommunicator 根据配置选择后端</li>
+<li>执行底层 NCCL 或其他通信库</li>
+</ol>
+<p><strong>后端选择</strong>：CudaCommunicator 根据配置和 GPU 能力自动选择后端，支持 NCCL、Custom All-Reduce（对称内存）、FlashInfer、Symmetric Memory、PyNCCL 等。</p>
+<h2>TP 与 CUDA Graph</h2>
+<p>TP 的集合通信操作需要特殊处理才能支持 CUDA Graph：</p>
+<pre><code class="language-html"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">注册 Custom Op</div>
+      <div class="engine-step-desc">all-reduce/all-gather 注册为 torch custom op</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Graph Capture</div>
+      <div class="engine-step-desc">GroupCoordinator.graph_capture() 上下文管理器</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">记录通信模式</div>
+      <div class="engine-step-desc">记录每个通信操作的输入输出形状</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Replay</div>
+      <div class="engine-step-desc">CUDA Graph replay 时自动执行通信</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>TP 与 CUDA Graph 的兼容机制：</p>
+<p><strong>问题</strong>：CUDA Graph 需要记录固定的 GPU 操作序列，但 NCCL 集合通信是动态的，无法直接 capture。</p>
+<p><strong>解决方案</strong>：</p>
+<ol>
+<li>将 all-reduce/all-gather 注册为 PyTorch custom op</li>
+<li>使用 GroupCoordinator.graph_capture() 上下文管理器</li>
+<li>在 capture 阶段记录通信操作的元数据</li>
+<li>Replay 时根据记录的元数据执行通信</li>
+</ol>
+<p><strong>关键代码</strong>：<code>vllm/distributed/parallel_state.py</code> 中的 GroupCoordinator 类。</p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+<th>默认值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--tensor-parallel-size</code></td>
+<td>TP 大小，权重切分 GPU 数</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>VLLM_ALL2ALL_BACKEND</code></td>
+<td>all-to-all 后端（EP 用）</td>
+<td>"naive"</td>
+</tr>
+<tr>
+<td><code>VLLM_USE_V1</code></td>
+<td>使用 V1 架构（影响 TP 实现）</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>VLLM_ATTENTION_BACKEND</code></td>
+<td>Attention 后端（影响 TP 通信）</td>
+<td>自动选择</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

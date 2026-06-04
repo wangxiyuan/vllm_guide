@@ -12,27 +12,877 @@
 <body data-page-id="speculative-decoding">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>投机解码总览</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">outline</span><span>16 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">draft</span><span>16 min</span></div>
       <h1>投机解码总览</h1>
-      <p class="hero-text">draft、verify、accept/reject 的统一入口</p>
+      <p class="hero-text">快速起草、严格验证：<span data-term="proposer" data-tip="快速生成候选 token 的模块，也叫 drafter。">proposer</span> 生成候选 token，target model 一次 forward 并行验证，<span data-term="rejection sampling" data-tip="按概率比 p(x">rejection sampling</span>/q(x) 决定是否接受每个 draft token 的算法。) 决定接受/拒绝。</p>
       <div class="tags"><span class="tag">Speculative Decoding</span><span class="tag">Draft</span><span class="tag">Verify</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/speculative-decoding-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>投机解码就像律师事务所的审稿流程：初级律师（proposer）快速起草一份文档，高级律师（target model）一次性审阅全部内容。高级律师接受正确的部分，遇到第一个错误就拒绝，并从错误位置重新改写。如果初级律师大部分写对了，整个流程比高级律师从头写要快得多。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-proc">
+      <div class="arch-proc-title">初级律师 (Proposer)</div>
+      <div class="arch-proc-sub">快速起草候选文档</div>
+      <div class="arch-box">Draft: A B C D</div>
+    </div>
+    <div class="arch-channel">
+      <div class="arch-arrow">→</div>
+      <div class="arch-label">候选 token</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">高级律师 (Target Model)</div>
+      <div class="arch-proc-sub">一次审阅全部内容</div>
+      <div class="arch-box">Verify: A ✓ B ✓ X ≠ C</div>
+    </div>
+    <div class="arch-channel">
+      <div class="arch-arrow">→</div>
+      <div class="arch-label">接受 A B + 奖励 X</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">最终输出</div>
+      <div class="arch-highlight">A B X（3 tokens / 1 forward）</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="spec-mental-model-html"><p>投机解码的心智模型展示了两个角色的协作：初级律师（Proposer）快速起草候选 token（如 A B C D），高级律师（Target Model）一次 forward 并行验证所有候选。验证结果为 A ✓ B ✓ X ≠ C（第一个错误出现在 C），最终输出为 A B X（接受的前缀 + 奖励 token X）。一次 forward 产出了 3 个 token，而非传统的 1 个。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>投机解码核心流程</h2>
+      
+<p>投机解码的每一步分为四个阶段：proposer 生成候选、target model 验证、rejection sampler 判断接受/拒绝、重新采样奖励 token。</p>
+<pre class="diagram-raw"><div class="sched-flow">
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Phase 1: Proposer 生成</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">proposer.generate() → k 个 draft token</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Phase 2: Target Model Forward</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">一次 forward 处理 k+1 个位置（原始 + draft）</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="waiting">
+    <div class="sched-phase-title">Phase 3: Rejection Sampling</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">比较 target logits 与 draft token → 接受匹配前缀，拒绝首个不匹配</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">Phase 4: 奖励 Token</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">从拒绝点采样 bonus token → 输出: accepted + bonus</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="spec-core-flow-html"><p>投机解码核心流程分四个阶段：</p>
+<ol>
+<li><strong>Proposer 生成</strong>：proposer.generate() 生成 k 个 draft token。</li>
+<li><strong>Target Model Forward</strong>：target model 一次 forward 处理 k+1 个位置（原始位置 + k 个 draft 位置），产出所有位置的 logits。</li>
+<li><strong>Rejection Sampling</strong>：比较 target logits 与 draft token，接受匹配的前缀，在首个不匹配处拒绝。</li>
+<li><strong>奖励 Token</strong>：从拒绝点采样一个 bonus token（从 target 分布），最终输出为 accepted tokens + bonus token。</li>
+</ol>
+</template>
+<div class="step-player" id="spec-core-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 4</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="spec-core-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>Proposer 生成 k 个候选 token</h3>proposer 根据自身方法（draft model / n-gram / EAGLE 等）生成 k 个 draft token。
+<code class="step-ref">vllm/v1/spec_decode/llm_base_proposer.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>Target Model 执行一次 forward</h3>将原始 token + k 个 draft token 拼接，target model 一次 forward 并行计算所有位置的 logits。
+<code class="step-ref">vllm/v1/worker/gpu_model_runner.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>Rejection Sampler 验证</h3>比较 target model 的 logits 与 draft token：接受匹配的前缀，在首个不匹配处拒绝。
+<code class="step-ref">vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>采样奖励 token</h3>在拒绝点从 target 分布采样一个 bonus token。输出：accepted tokens + bonus token。
+<code class="step-ref">vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>接受/拒绝示例</h2>
+      
+<p>假设 proposer 生成 4 个 draft token，target model 一次 forward 验证：</p>
+<h3>场景 1：部分接受</h3>
+<table>
+<thead>
+<tr>
+<th>位置</th>
+<th>Draft Token</th>
+<th>Target Top-1</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>A</td>
+<td>A</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B</td>
+<td>B</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C</td>
+<td>X</td>
+<td>✗ 拒绝（X ≠ C）</td>
+</tr>
+<tr>
+<td>3</td>
+<td>D</td>
+<td>—</td>
+<td>未验证</td>
+</tr>
+</tbody>
+</table>
+<p>输出：<strong>A B X</strong>（A B 为接受的前缀，X 为从 target 分布采样的 bonus token）</p>
+<h3>场景 2：全部接受</h3>
+<table>
+<thead>
+<tr>
+<th>位置</th>
+<th>Draft Token</th>
+<th>Target Top-1</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>A</td>
+<td>A</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B</td>
+<td>B</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C</td>
+<td>C</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>3</td>
+<td>D</td>
+<td>D</td>
+<td>✓ 接受</td>
+</tr>
+</tbody>
+</table>
+<p>输出：<strong>A B C D E</strong>（A B C D 全部接受，E 为 bonus token）</p>
+<p>关键洞察：全部接受时，一次 forward 产出 k+1 个 token（k 个 draft + 1 个 bonus），加速比最高。部分接受时，产出 accepted_count + 1 个 token。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Proposer 方法一览</h2>
+      
+<p>vLLM 支持多种 proposer 方法，按是否使用神经网络、是否自回归可以分为以下几类：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>工作原理</th>
+<th>神经模型？</th>
+<th>自回归？</th>
+<th>关键特征</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>draft_model</code></td>
+<td>独立的小模型自回归生成</td>
+<td>是</td>
+<td>是</td>
+<td>最基础的投机解码，需要单独的 draft model</td>
+</tr>
+<tr>
+<td><code>eagle</code> / <code>eagle3</code></td>
+<td>利用 target hidden states + 轻量 EAGLE head</td>
+<td>是</td>
+<td>是</td>
+<td>高接受率，EAGLE3 用中间层 hidden states</td>
+</tr>
+<tr>
+<td><code>ngram</code> / <code>ngram_gpu</code></td>
+<td>在已有 token 序列中做 n-gram 模式匹配</td>
+<td>否</td>
+<td>否</td>
+<td>零额外推理开销，GPU 版全向量化</td>
+</tr>
+<tr>
+<td><code>medusa</code></td>
+<td>多个预测头并行预测不同未来位置</td>
+<td>是</td>
+<td>否</td>
+<td>单次 forward 生成所有 draft，低延迟</td>
+</tr>
+<tr>
+<td><code>mtp</code></td>
+<td>共享 embedding/LM head 的多 token 预测层</td>
+<td>是</td>
+<td>是</td>
+<td>支持 deepseek/gemma4/step3.5/qwen3_next 等</td>
+</tr>
+<tr>
+<td><code>dflash</code></td>
+<td>非因果注意力一次生成所有 draft token</td>
+<td>是</td>
+<td>否</td>
+<td>并行起草，单次 pass 产出所有候选</td>
+</tr>
+<tr>
+<td><code>suffix_decoding</code></td>
+<td>后缀树模式匹配</td>
+<td>否</td>
+<td>否</td>
+<td>可变长度匹配，比 n-gram 更长模式</td>
+</tr>
+<tr>
+<td><code>extract_hidden_states</code></td>
+<td>直接提取 target model 的中间预测</td>
+<td>是</td>
+<td>否</td>
+<td>调试用，不做实际投机解码</td>
+</tr>
+<tr>
+<td><code>custom_class</code></td>
+<td>用户自定义 proposer</td>
+<td>视实现</td>
+<td>视实现</td>
+<td>灵活扩展</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Rejection Sampling 算法</h2>
+      
+<p>Rejection sampling 是投机解码的核心验证算法，决定每个 draft token 的接受/拒绝。</p>
+<h3>贪心模式</h3>
+<p>对于贪心解码（temperature=0），判断极其简单：</p>
+<pre><code class="language-python">accept = (target_argmax == draft_token)
+</code></pre>
+<p>每个位置只需比较 target model 的 argmax 与 draft token 是否一致。</p>
+<h3>随机模式</h3>
+<p>对于随机采样（temperature>0），接受概率取决于 draft 分布 q(x) 和 target 分布 p(x) 的比值：</p>
+<pre><code class="language-python">accept = (p(x) / q(x)) > u
+</code></pre>
+<p>其中 u 是 [0, 1] 上的均匀随机数。当 draft 分布 q(x) 接近 target 分布 p(x) 时，p(x)/q(x) 接近 1，接受概率高。</p>
+<p>拒绝后，从<strong>残差分布</strong>重新采样 bonus token：</p>
+<pre><code class="language-python">residual = max(p(x) - q(x), 0)
+bonus_token = sample(normalize(residual))
+</code></pre>
+<h3>三个 Triton Kernel</h3>
+<p>Rejection sampling 在 GPU 上通过三个 Triton kernel 实现：</p>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>compute_block_stats</code></td>
+<td>计算每个 block 的概率统计（max、sum），用于后续比较</td>
+</tr>
+<tr>
+<td><code>rejection_kernel</code></td>
+<td>执行接受/拒绝判断，生成 accept mask</td>
+</tr>
+<tr>
+<td><code>resample_kernel</code></td>
+<td>从残差分布采样 bonus token</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Scheduler 中的投机解码</h2>
+      
+<p>投机解码深度集成到调度器中，影响 token 计数、KV 分配和状态更新。</p>
+<h3>Token 计数</h3>
+<pre><code class="language-python">num_tokens_with_spec = num_prompt_tokens + num_output_tokens + num_spec_tokens
+</code></pre>
+<p>投机 token 被计入 <code>num_tokens_with_spec</code>，调度器会为这些 token 预分配 KV blocks（lookahead）。</p>
+<h3>KV 分配与回滚</h3>
+<p>调度时，<code>allocate_slots()</code> 为 spec tokens 分配 KV 空间。验证后：</p>
+<pre><code class="language-python">num_rejected = num_draft - num_accepted
+num_computed_tokens -= num_rejected
+spec_token_ids.clear()
+spec_token_ids.extend(new_spec_tokens)
+</code></pre>
+<p>被拒绝的 token 对应的 KV 空间会被释放，<code>num_computed_tokens</code> 回退到实际接受的长度。</p>
+<h3>SchedulerOutput 中的投机字段</h3>
+<pre><code class="language-python">scheduled_spec_decode_tokens: dict[str, list[int]]
+</code></pre>
+<p>每个请求的投机 token IDs 通过此字段传递给 ModelRunner。</p>
+<p><code>vllm/v1/core/sched/scheduler.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>配置方法</h2>
+      
+<p>通过命令行参数启用和配置投机解码：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>proposer 模型路径（ngram/suffix 不需要）</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>每步生成的 draft token 数（k）</td>
+</tr>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>proposer 方法：eagle/eagle3/ngram/medusa/mtp/dflash/suffix 等</td>
+</tr>
+<tr>
+<td><code>--draft-sample-method</code></td>
+<td>proposer 采样方法：greedy / probabilistic</td>
+</tr>
+<tr>
+<td><code>--rejection-sample-method</code></td>
+<td>验证算法：rejection（默认）/ typical_acceptance</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>speculative_model</code></td>
+<td>None</td>
+<td>Proposer 模型路径</td>
+</tr>
+<tr>
+<td><code>num_speculative_tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+<tr>
+<td><code>speculative_method</code></td>
+<td>None</td>
+<td>Proposer 方法名</td>
+</tr>
+<tr>
+<td><code>draft_sample_method</code></td>
+<td>"greedy"</td>
+<td>Proposer 采样策略</td>
+</tr>
+<tr>
+<td><code>rejection_sample_method</code></td>
+<td>"rejection"</td>
+<td>验证算法</td>
+</tr>
+<tr>
+<td><code>speculative_max_model_len</code></td>
+<td>None</td>
+<td>Proposer 最大序列长度</td>
+</tr>
+<tr>
+<td><code>speculative_disable_by_batch_size</code></td>
+<td>None</td>
+<td>batch size 超过此值时禁用投机解码</td>
+</tr>
+<tr>
+<td><code>ngram_prompt_lookup_min</code></td>
+<td>1</td>
+<td>N-gram 最小匹配长度</td>
+</tr>
+<tr>
+<td><code>ngram_prompt_lookup_max</code></td>
+<td>3</td>
+<td>N-gram 最大匹配长度</td>
+</tr>
+<tr>
+<td><code>speculative_acceptance_method</code></td>
+<td>"rejection_sampler"</td>
+<td>接受方法</td>
+</tr>
+<tr>
+<td><code>disable_mqa_scorer</code></td>
+<td>False</td>
+<td>禁用 MQA scorer</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/speculative.py</code></p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>投机解码就像律师事务所的审稿流程：初级律师（proposer）快速起草一份文档，高级律师（target model）一次性审阅全部内容。高级律师接受正确的部分，遇到第一个错误就拒绝，并从错误位置重新改写。如果初级律师大部分写对了，整个流程比高级律师从头写要快得多。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-proc">
+      <div class="arch-proc-title">初级律师 (Proposer)</div>
+      <div class="arch-proc-sub">快速起草候选文档</div>
+      <div class="arch-box">Draft: A B C D</div>
+    </div>
+    <div class="arch-channel">
+      <div class="arch-arrow">→</div>
+      <div class="arch-label">候选 token</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">高级律师 (Target Model)</div>
+      <div class="arch-proc-sub">一次审阅全部内容</div>
+      <div class="arch-box">Verify: A ✓ B ✓ X ≠ C</div>
+    </div>
+    <div class="arch-channel">
+      <div class="arch-arrow">→</div>
+      <div class="arch-label">接受 A B + 奖励 X</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">最终输出</div>
+      <div class="arch-highlight">A B X（3 tokens / 1 forward）</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>投机解码的心智模型展示了两个角色的协作：初级律师（Proposer）快速起草候选 token（如 A B C D），高级律师（Target Model）一次 forward 并行验证所有候选。验证结果为 A ✓ B ✓ X ≠ C（第一个错误出现在 C），最终输出为 A B X（接受的前缀 + 奖励 token X）。一次 forward 产出了 3 个 token，而非传统的 1 个。</p>
+<h2>投机解码核心流程</h2>
+<p>投机解码的每一步分为四个阶段：proposer 生成候选、target model 验证、rejection sampler 判断接受/拒绝、重新采样奖励 token。</p>
+<pre><code class="language-html"><div class="sched-flow">
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Phase 1: Proposer 生成</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">proposer.generate() → k 个 draft token</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="running">
+    <div class="sched-phase-title">Phase 2: Target Model Forward</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">一次 forward 处理 k+1 个位置（原始 + draft）</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="waiting">
+    <div class="sched-phase-title">Phase 3: Rejection Sampling</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">比较 target logits 与 draft token → 接受匹配前缀，拒绝首个不匹配</div>
+    </div>
+  </div>
+  <div class="sched-phase" data-phase="output">
+    <div class="sched-phase-title">Phase 4: 奖励 Token</div>
+    <div class="sched-phase-steps">
+      <div class="sched-step">从拒绝点采样 bonus token → 输出: accepted + bonus</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>投机解码核心流程分四个阶段：</p>
+<ol>
+<li><strong>Proposer 生成</strong>：proposer.generate() 生成 k 个 draft token。</li>
+<li><strong>Target Model Forward</strong>：target model 一次 forward 处理 k+1 个位置（原始位置 + k 个 draft 位置），产出所有位置的 logits。</li>
+<li><strong>Rejection Sampling</strong>：比较 target logits 与 draft token，接受匹配的前缀，在首个不匹配处拒绝。</li>
+<li><strong>奖励 Token</strong>：从拒绝点采样一个 bonus token（从 target 分布），最终输出为 accepted tokens + bonus token。</li>
+</ol>
+<h3>1. Proposer 生成 k 个候选 token</h3>
+<p>proposer 根据自身方法（draft model / n-gram / EAGLE 等）生成 k 个 draft token。
+<code>vllm/v1/spec_decode/llm_base_proposer.py</code></p>
+<h3>2. Target Model 执行一次 forward</h3>
+<p>将原始 token + k 个 draft token 拼接，target model 一次 forward 并行计算所有位置的 logits。
+<code>vllm/v1/worker/gpu_model_runner.py</code></p>
+<h3>3. Rejection Sampler 验证</h3>
+<p>比较 target model 的 logits 与 draft token：接受匹配的前缀，在首个不匹配处拒绝。
+<code>vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code></p>
+<h3>4. 采样奖励 token</h3>
+<p>在拒绝点从 target 分布采样一个 bonus token。输出：accepted tokens + bonus token。
+<code>vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code></p>
+<h2>接受/拒绝示例</h2>
+<p>假设 proposer 生成 4 个 draft token，target model 一次 forward 验证：</p>
+<h3>场景 1：部分接受</h3>
+<table>
+<thead>
+<tr>
+<th>位置</th>
+<th>Draft Token</th>
+<th>Target Top-1</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>A</td>
+<td>A</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B</td>
+<td>B</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C</td>
+<td>X</td>
+<td>✗ 拒绝（X ≠ C）</td>
+</tr>
+<tr>
+<td>3</td>
+<td>D</td>
+<td>—</td>
+<td>未验证</td>
+</tr>
+</tbody>
+</table>
+<p>输出：<strong>A B X</strong>（A B 为接受的前缀，X 为从 target 分布采样的 bonus token）</p>
+<h3>场景 2：全部接受</h3>
+<table>
+<thead>
+<tr>
+<th>位置</th>
+<th>Draft Token</th>
+<th>Target Top-1</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>A</td>
+<td>A</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>1</td>
+<td>B</td>
+<td>B</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C</td>
+<td>C</td>
+<td>✓ 接受</td>
+</tr>
+<tr>
+<td>3</td>
+<td>D</td>
+<td>D</td>
+<td>✓ 接受</td>
+</tr>
+</tbody>
+</table>
+<p>输出：<strong>A B C D E</strong>（A B C D 全部接受，E 为 bonus token）</p>
+<p>关键洞察：全部接受时，一次 forward 产出 k+1 个 token（k 个 draft + 1 个 bonus），加速比最高。部分接受时，产出 accepted_count + 1 个 token。</p>
+<h2>Proposer 方法一览</h2>
+<p>vLLM 支持多种 proposer 方法，按是否使用神经网络、是否自回归可以分为以下几类：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>工作原理</th>
+<th>神经模型？</th>
+<th>自回归？</th>
+<th>关键特征</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>draft_model</code></td>
+<td>独立的小模型自回归生成</td>
+<td>是</td>
+<td>是</td>
+<td>最基础的投机解码，需要单独的 draft model</td>
+</tr>
+<tr>
+<td><code>eagle</code> / <code>eagle3</code></td>
+<td>利用 target hidden states + 轻量 EAGLE head</td>
+<td>是</td>
+<td>是</td>
+<td>高接受率，EAGLE3 用中间层 hidden states</td>
+</tr>
+<tr>
+<td><code>ngram</code> / <code>ngram_gpu</code></td>
+<td>在已有 token 序列中做 n-gram 模式匹配</td>
+<td>否</td>
+<td>否</td>
+<td>零额外推理开销，GPU 版全向量化</td>
+</tr>
+<tr>
+<td><code>medusa</code></td>
+<td>多个预测头并行预测不同未来位置</td>
+<td>是</td>
+<td>否</td>
+<td>单次 forward 生成所有 draft，低延迟</td>
+</tr>
+<tr>
+<td><code>mtp</code></td>
+<td>共享 embedding/LM head 的多 token 预测层</td>
+<td>是</td>
+<td>是</td>
+<td>支持 deepseek/gemma4/step3.5/qwen3_next 等</td>
+</tr>
+<tr>
+<td><code>dflash</code></td>
+<td>非因果注意力一次生成所有 draft token</td>
+<td>是</td>
+<td>否</td>
+<td>并行起草，单次 pass 产出所有候选</td>
+</tr>
+<tr>
+<td><code>suffix_decoding</code></td>
+<td>后缀树模式匹配</td>
+<td>否</td>
+<td>否</td>
+<td>可变长度匹配，比 n-gram 更长模式</td>
+</tr>
+<tr>
+<td><code>extract_hidden_states</code></td>
+<td>直接提取 target model 的中间预测</td>
+<td>是</td>
+<td>否</td>
+<td>调试用，不做实际投机解码</td>
+</tr>
+<tr>
+<td><code>custom_class</code></td>
+<td>用户自定义 proposer</td>
+<td>视实现</td>
+<td>视实现</td>
+<td>灵活扩展</td>
+</tr>
+</tbody>
+</table>
+<h2>Rejection Sampling 算法</h2>
+<p>Rejection sampling 是投机解码的核心验证算法，决定每个 draft token 的接受/拒绝。</p>
+<h3>贪心模式</h3>
+<p>对于贪心解码（temperature=0），判断极其简单：</p>
+<pre><code class="language-python">accept = (target_argmax == draft_token)
+</code></pre>
+<p>每个位置只需比较 target model 的 argmax 与 draft token 是否一致。</p>
+<h3>随机模式</h3>
+<p>对于随机采样（temperature>0），接受概率取决于 draft 分布 q(x) 和 target 分布 p(x) 的比值：</p>
+<pre><code class="language-python">accept = (p(x) / q(x)) > u
+</code></pre>
+<p>其中 u 是 [0, 1] 上的均匀随机数。当 draft 分布 q(x) 接近 target 分布 p(x) 时，p(x)/q(x) 接近 1，接受概率高。</p>
+<p>拒绝后，从<strong>残差分布</strong>重新采样 bonus token：</p>
+<pre><code class="language-python">residual = max(p(x) - q(x), 0)
+bonus_token = sample(normalize(residual))
+</code></pre>
+<h3>三个 Triton Kernel</h3>
+<p>Rejection sampling 在 GPU 上通过三个 Triton kernel 实现：</p>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>compute_block_stats</code></td>
+<td>计算每个 block 的概率统计（max、sum），用于后续比较</td>
+</tr>
+<tr>
+<td><code>rejection_kernel</code></td>
+<td>执行接受/拒绝判断，生成 accept mask</td>
+</tr>
+<tr>
+<td><code>resample_kernel</code></td>
+<td>从残差分布采样 bonus token</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/worker/gpu/spec_decode/rejection_sampler.py</code></p>
+<h2>Scheduler 中的投机解码</h2>
+<p>投机解码深度集成到调度器中，影响 token 计数、KV 分配和状态更新。</p>
+<h3>Token 计数</h3>
+<pre><code class="language-python">num_tokens_with_spec = num_prompt_tokens + num_output_tokens + num_spec_tokens
+</code></pre>
+<p>投机 token 被计入 <code>num_tokens_with_spec</code>，调度器会为这些 token 预分配 KV blocks（lookahead）。</p>
+<h3>KV 分配与回滚</h3>
+<p>调度时，<code>allocate_slots()</code> 为 spec tokens 分配 KV 空间。验证后：</p>
+<pre><code class="language-python">num_rejected = num_draft - num_accepted
+num_computed_tokens -= num_rejected
+spec_token_ids.clear()
+spec_token_ids.extend(new_spec_tokens)
+</code></pre>
+<p>被拒绝的 token 对应的 KV 空间会被释放，<code>num_computed_tokens</code> 回退到实际接受的长度。</p>
+<h3>SchedulerOutput 中的投机字段</h3>
+<pre><code class="language-python">scheduled_spec_decode_tokens: dict[str, list[int]]
+</code></pre>
+<p>每个请求的投机 token IDs 通过此字段传递给 ModelRunner。</p>
+<p><code>vllm/v1/core/sched/scheduler.py</code></p>
+<h2>配置方法</h2>
+<p>通过命令行参数启用和配置投机解码：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>proposer 模型路径（ngram/suffix 不需要）</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>每步生成的 draft token 数（k）</td>
+</tr>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>proposer 方法：eagle/eagle3/ngram/medusa/mtp/dflash/suffix 等</td>
+</tr>
+<tr>
+<td><code>--draft-sample-method</code></td>
+<td>proposer 采样方法：greedy / probabilistic</td>
+</tr>
+<tr>
+<td><code>--rejection-sample-method</code></td>
+<td>验证算法：rejection（默认）/ typical_acceptance</td>
+</tr>
+</tbody>
+</table>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>speculative_model</code></td>
+<td>None</td>
+<td>Proposer 模型路径</td>
+</tr>
+<tr>
+<td><code>num_speculative_tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+<tr>
+<td><code>speculative_method</code></td>
+<td>None</td>
+<td>Proposer 方法名</td>
+</tr>
+<tr>
+<td><code>draft_sample_method</code></td>
+<td>"greedy"</td>
+<td>Proposer 采样策略</td>
+</tr>
+<tr>
+<td><code>rejection_sample_method</code></td>
+<td>"rejection"</td>
+<td>验证算法</td>
+</tr>
+<tr>
+<td><code>speculative_max_model_len</code></td>
+<td>None</td>
+<td>Proposer 最大序列长度</td>
+</tr>
+<tr>
+<td><code>speculative_disable_by_batch_size</code></td>
+<td>None</td>
+<td>batch size 超过此值时禁用投机解码</td>
+</tr>
+<tr>
+<td><code>ngram_prompt_lookup_min</code></td>
+<td>1</td>
+<td>N-gram 最小匹配长度</td>
+</tr>
+<tr>
+<td><code>ngram_prompt_lookup_max</code></td>
+<td>3</td>
+<td>N-gram 最大匹配长度</td>
+</tr>
+<tr>
+<td><code>speculative_acceptance_method</code></td>
+<td>"rejection_sampler"</td>
+<td>接受方法</td>
+</tr>
+<tr>
+<td><code>disable_mqa_scorer</code></td>
+<td>False</td>
+<td>禁用 MQA scorer</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/config/speculative.py</code></p>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

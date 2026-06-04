@@ -12,27 +12,517 @@
 <body data-page-id="context-parallel">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>distributed</span><span>/</span><span>Context Parallel</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">todo</span><span>14 min</span></div>
+      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">draft</span><span>14 min</span></div>
       <h1>Context Parallel</h1>
-      <p class="hero-text">DCP（Decode Context Parallel）与 PCP（Prefill Context Parallel）原理</p>
+      <p class="hero-text">DCP 复用 TP GPU 扩展 decode 序列长度，PCP 独立维度加速 MoE prefill，<span data-term="LSE 校正" data-tip="各 rank 只看到部分 KV，softmax 分母不同，需用 log-sum-exp 值做数值校正后合并。">LSE 校正</span> 合并各 rank 的 attention 输出。</p>
       <div class="tags"><span class="tag">Context Parallel</span><span class="tag">DCP</span><span class="tag">PCP</span><span class="tag">All-to-All</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/context-parallel-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象你在阅读一份很长的文档。一个人读不完，于是把文档拆成几段，每人读一段。但回答关于整篇文档的问题时，每个人都需要知道其他人读了什么——这就是 Context Parallel 的核心矛盾。</p>
+<p>DCP（Decode Context Parallel）把 KV cache（"已读内容的记忆"）切分到多个 GPU 上，每个 DCP rank 只存一部分上下文，但 query 在所有 rank 上完整，通过 LSE 校正合并各 rank 的 attention 输出。PCP（Prefill Context Parallel）则把输入 token 切分到多个 GPU，加速 MoE 模型的 prefill 阶段。</p>
+<pre class="diagram-raw"><div class="comm-panorama">
+  <div class="comm-proc">
+    <div class="comm-proc-title">DCP：KV Cache 切分</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-rank="0">DCP Rank 0：Q (完整) + KV[0..N/2]</div>
+      <div class="comm-node" data-rank="1">DCP Rank 1：Q (完整) + KV[N/2..N]</div>
+      <div class="comm-node-sub">LSE 校正 → 合并部分 attention 输出</div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">▶</div>
+      <div class="comm-label">DCP 复用 TP GPU，tp_size % dcp_size == 0</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">PCP：Prefill Token 切分</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-rank="0">PCP Rank 0：Token[0..T/2]</div>
+      <div class="comm-node" data-rank="1">PCP Rank 1：Token[T/2..T]</div>
+      <div class="comm-node-sub">AllGather → MoE → ReduceScatter</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="cp-mental-model-html"><p>Context Parallel 分为两种模式：</p>
+<p><strong>DCP（Decode Context Parallel）</strong>：将 KV cache 切分到多个 GPU。每个 DCP rank 持有完整的 query 但只有部分 KV cache（如 Rank 0 持有 KV[0..N/2]，Rank 1 持有 KV[N/2..N]）。各 rank 独立计算部分 attention 输出，通过 LSE 校正合并为完整结果。</p>
+<p><strong>PCP（Prefill Context Parallel）</strong>：将 prefill 输入 token 切分到多个 GPU。每个 PCP rank 处理部分 token（如 Rank 0 处理 Token[0..T/2]，Rank 1 处理 Token[T/2..T]）。在 MoE 前通过 AllGather 汇聚 token，MoE 后通过 ReduceScatter 重新切分。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>DCP 通信模式</h2>
+      
+<p>DCP 复用 TP 组的 GPU，将一个 TP 组拆分为 <code>tp_size / dcp_size</code> 个 DCP 组。约束条件：<code>tp_size % dcp_size == 0</code>。每个 DCP rank 持有 KV cache 的不同序列段，但 query 在所有 DCP rank 上完整（通过 all-gather 获得）。</p>
+<pre class="diagram-raw"><div class="engine-step-flow">
+  <div class="engine-step" data-step="1">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">AllGather Query</div>
+      <div class="engine-step-desc">沿 head 维度 all-gather Q，每个 DCP rank 获得完整 query</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="2">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">本地 Attention</div>
+      <div class="engine-step-desc">完整 Q 对本地 KV cache 做 attention，产出 output + LSE</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="3">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">LSE 校正合并</div>
+      <div class="engine-step-desc">用 LSE 值做数值校正，合并各 rank 的部分 attention 输出</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="4">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">ReduceScatter 输出</div>
+      <div class="engine-step-desc">将校正后的输出按 head 维度切分回各 DCP rank</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="dcp-comm-flow-html"><p>DCP 通信模式包含四个步骤：</p>
+<ol>
+<li>AllGather Query — 沿 head 维度 all-gather Q，使每个 DCP rank 获得完整 query。</li>
+<li>本地 Attention — 用完整 Q 对本地 KV cache 做 attention，产出部分 output 和 LSE（log-sum-exp）。</li>
+<li>LSE 校正合并 — 用 LSE 值做数值校正，合并各 rank 的部分 attention 输出为完整结果。</li>
+<li>ReduceScatter 输出 — 将校正后的输出按 head 维度切分回各 DCP rank。</li>
+</ol>
+</template>
+<div class="step-player" id="dcp-flash-attn-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 4</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="dcp-flash-attn-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>AllGather Query</h3><code>get_dcp_group().all_gather(query, dim=1)</code> 沿 head 维度 all-gather Q，使每个 DCP rank 拥有完整的 query，可以对本地 KV cache 做 attention。
+<code class="step-ref">vllm/v1/attention/backends/flash_attn.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>本地 Attention</h3>用完整 Q 对本地 KV cache 做 attention，产出 context_attn_out 和 LSE（log-sum-exp）。同时用本地 Q 对新 token 做 query attention。
+<code class="step-ref">vllm/v1/attention/backends/flash_attn.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>LSE 校正合并</h3>各 DCP rank 的 attention 输出需要用 LSE 做数值校正（因为每个 rank 只看到部分 KV，softmax 分母不同）。校正后合并 context 和 query attention 输出。
+<code class="step-ref">vllm/v1/attention/backends/flash_attn.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>ReduceScatter 校正输出</h3>将 LSE 校正后的完整输出沿 head 维度 reduce_scatter，每个 DCP rank 取回属于自己的 head 切片。
+<code class="step-ref">vllm/v1/attention/backends/flash_attn.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>LSE 校正原理</h2>
+      
+<p>每个 DCP rank 只看到部分 KV cache，独立计算 attention 时 softmax 分母不同，直接相加会引入数值误差。LSE（Log-Sum-Exp）校正解决了这个问题。</p>
+<p>每个 rank 计算部分 attention 后，同时产出 LSE 值（即 <code>log(sum(exp(attn_logits)))</code>）。校正过程：</p>
+<pre><code class="language-python">lse_max = max(lse_i for i in range(dcp_world_size))
+global_lse = log(sum(exp(lse_i - lse_max) for i in range(dcp_world_size))) + lse_max
+result = sum(output_i * exp(lse_i - global_lse) for i in range(dcp_world_size))
+</code></pre>
+<p>直觉理解：<code>exp(lse_i - global_lse)</code> 是每个 rank 的 attention 输出在全局 softmax 中的权重。LSE 校正等价于将各 rank 的部分 softmax 结果按正确的比例加权合并。</p>
+<p><code>vllm/v1/attention/backends/flash_attn.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>DCP 合并后端</h2>
+      
+<p>LSE 校正合并有两种后端实现，核心区别在于通信次数：</p>
+<table>
+<thead>
+<tr>
+<th>后端</th>
+<th>NCCL 通信次数</th>
+<th>流程</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AG+RS</td>
+<td>3 次</td>
+<td>all_gather(LSE) + all_gather(output) → Triton LSE 校正 → reduce_scatter(corrected)</td>
+<td>通用</td>
+</tr>
+<tr>
+<td>A2A</td>
+<td>1 次</td>
+<td>Triton 打包 output+LSE → all_to_all_single → Triton 解包+LSE 加权合并</td>
+<td>低延迟优先</td>
+</tr>
+</tbody>
+</table>
+<p>AG+RS 后端分三步通信：先 all_gather LSE 值用于计算全局校正系数，再 all_gather 各 rank 的 attention 输出，Triton kernel 做 LSE 校正计算，最后 reduce_scatter 将结果切分回各 rank。</p>
+<p>A2A 后端将 output 和 LSE 打包到同一 buffer，用单次 all_to_all_single 通信完成数据交换，然后 Triton kernel 解包并直接做 LSE 加权合并。通信次数从 3 降为 1，显著降低延迟。</p>
+<p><code>vllm/v1/attention/ops/dcp_alltoall.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>A2A 实现</h2>
+      
+<p>A2A 后端的核心函数 <code>dcp_a2a_lse_reduce()</code> 将 output 和 LSE 打包到同一 buffer，通过单次 all_to_all 完成交换，再解包并做 LSE 加权合并。</p>
+<div class="step-player" id="dcp-a2a-impl"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 3</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="dcp-a2a-impl-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>打包 output + LSE</h3>Triton kernel <code>_dcp_a2a_pack_send</code> 将每个 rank 的 attention output 和 LSE 值打包到连续 buffer。FP16 输出时每对 rank 间打包 2 个 LSE slot（FP16 占 2 字节，LSE 为 FP32 占 4 字节，2 个 LSE 刚好对齐）；FP32 输出时打包 1 个 LSE slot。
+<code class="step-ref">vllm/v1/attention/ops/dcp_alltoall.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>All-to-All 通信</h3><code>torch.distributed.all_to_all_single</code> 单次集合通信，每个 rank 向所有其他 rank 发送不同的 output+LSE 数据块，同时接收其他 rank 的数据块。
+<code class="step-ref">vllm/v1/attention/ops/dcp_alltoall.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>解包 + LSE 加权合并</h3>Triton kernel <code>_dcp_a2a_unpack_combine</code> 解包接收到的 output+LSE 数据，用 LSE 值计算加权系数 <code>exp(lse_i - global_lse)</code>，对各 rank 的 output 做加权求和，得到校正后的完整 attention 输出。
+<code class="step-ref">vllm/v1/attention/ops/dcp_alltoall.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>PCP 通信模式</h2>
+      
+<p>PCP 是独立于 TP 的并行维度，主要用于 MoE 模型的 prefill 加速。与 DCP 复用 TP GPU 不同，PCP 增加总 GPU 数量。GPU 进程布局为 <code>reshape(ExternalDP, DP, PP, PCP, TP)</code>。</p>
+<div class="step-player" id="pcp-moe-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 3</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="pcp-moe-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>MoE Dispatch 前：AllGather</h3><code>get_pcp_group().all_gather(hidden_states, dim=0)</code> 沿 token 维度 all-gather，将分散在各 PCP rank 的 token 汇聚，使 MoE router 能看到完整 token 集合。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>MoE 本地计算</h3>每个 PCP rank 对汇聚后的完整 token 集合执行 MoE dispatch → expert computation → MoE combine。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>MoE Combine 后：ReduceScatter</h3><code>get_pcp_group().reduce_scatter(hidden_states, dim=0)</code> 沿 token 维度 reduce-scatter，将 MoE 计算结果重新切分到各 PCP rank。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>CP 与 TP/SP 的组合</h2>
+      
+<table>
+<thead>
+<tr>
+<th>并行维度</th>
+<th>切分对象</th>
+<th>通信操作</th>
+<th>与 TP 的关系</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP</td>
+<td>权重（output/input 维度）</td>
+<td>all_reduce / all_gather</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SP</td>
+<td>激活值（序列/token 维度）</td>
+<td>reduce_scatter + all_gather</td>
+<td>TP 的附带优化，tp>1 时启用</td>
+</tr>
+<tr>
+<td>DCP</td>
+<td>KV cache（上下文序列）</td>
+<td>all_gather(Q) + LSE 校正 + reduce_scatter / all_to_all</td>
+<td>复用 TP GPU，tp_size % dcp_size == 0</td>
+</tr>
+<tr>
+<td>PCP</td>
+<td>Prefill token</td>
+<td>all_gather + reduce_scatter</td>
+<td>独立维度，增加 GPU 数</td>
+</tr>
+</tbody>
+</table>
+<p>组合约束：<code>total_cp = pcp_world_size × dcp_world_size</code>，<code>total_cp_rank = pcp_rank × dcp_world_size + dcp_rank</code>。KV cache 按 <code>total_cp_rank</code> 交错存储，确保 DCP 和 PCP 的 KV 切分互不冲突。</p>
+<p><code>vllm/distributed/parallel_state.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--dcp-size</code></td>
+<td>1</td>
+<td>DCP 组大小，需满足 tp_size % dcp_size == 0</td>
+</tr>
+<tr>
+<td><code>--dcp-comm-backend</code></td>
+<td>"ag_rs"</td>
+<td>DCP 合并后端：ag_rs（AllGather+ReduceScatter）或 a2a（All-to-All）</td>
+</tr>
+<tr>
+<td><code>--prefill-context-parallel-size</code></td>
+<td>1</td>
+<td>PCP 组大小，独立于 TP 增加 GPU 数</td>
+</tr>
+<tr>
+<td><code>--context-parallel-size</code></td>
+<td>1</td>
+<td>总 CP 大小（= pcp_size × dcp_size）</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象你在阅读一份很长的文档。一个人读不完，于是把文档拆成几段，每人读一段。但回答关于整篇文档的问题时，每个人都需要知道其他人读了什么——这就是 Context Parallel 的核心矛盾。</p>
+<p>DCP（Decode Context Parallel）把 KV cache（"已读内容的记忆"）切分到多个 GPU 上，每个 DCP rank 只存一部分上下文，但 query 在所有 rank 上完整，通过 LSE 校正合并各 rank 的 attention 输出。PCP（Prefill Context Parallel）则把输入 token 切分到多个 GPU，加速 MoE 模型的 prefill 阶段。</p>
+<pre><code class="language-html"><div class="comm-panorama">
+  <div class="comm-proc">
+    <div class="comm-proc-title">DCP：KV Cache 切分</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-rank="0">DCP Rank 0：Q (完整) + KV[0..N/2]</div>
+      <div class="comm-node" data-rank="1">DCP Rank 1：Q (完整) + KV[N/2..N]</div>
+      <div class="comm-node-sub">LSE 校正 → 合并部分 attention 输出</div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">▶</div>
+      <div class="comm-label">DCP 复用 TP GPU，tp_size % dcp_size == 0</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">PCP：Prefill Token 切分</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-rank="0">PCP Rank 0：Token[0..T/2]</div>
+      <div class="comm-node" data-rank="1">PCP Rank 1：Token[T/2..T]</div>
+      <div class="comm-node-sub">AllGather → MoE → ReduceScatter</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Context Parallel 分为两种模式：</p>
+<p><strong>DCP（Decode Context Parallel）</strong>：将 KV cache 切分到多个 GPU。每个 DCP rank 持有完整的 query 但只有部分 KV cache（如 Rank 0 持有 KV[0..N/2]，Rank 1 持有 KV[N/2..N]）。各 rank 独立计算部分 attention 输出，通过 LSE 校正合并为完整结果。</p>
+<p><strong>PCP（Prefill Context Parallel）</strong>：将 prefill 输入 token 切分到多个 GPU。每个 PCP rank 处理部分 token（如 Rank 0 处理 Token[0..T/2]，Rank 1 处理 Token[T/2..T]）。在 MoE 前通过 AllGather 汇聚 token，MoE 后通过 ReduceScatter 重新切分。</p>
+<h2>DCP 通信模式</h2>
+<p>DCP 复用 TP 组的 GPU，将一个 TP 组拆分为 <code>tp_size / dcp_size</code> 个 DCP 组。约束条件：<code>tp_size % dcp_size == 0</code>。每个 DCP rank 持有 KV cache 的不同序列段，但 query 在所有 DCP rank 上完整（通过 all-gather 获得）。</p>
+<pre><code class="language-html"><div class="engine-step-flow">
+  <div class="engine-step" data-step="1">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">AllGather Query</div>
+      <div class="engine-step-desc">沿 head 维度 all-gather Q，每个 DCP rank 获得完整 query</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="2">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">本地 Attention</div>
+      <div class="engine-step-desc">完整 Q 对本地 KV cache 做 attention，产出 output + LSE</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="3">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">LSE 校正合并</div>
+      <div class="engine-step-desc">用 LSE 值做数值校正，合并各 rank 的部分 attention 输出</div>
+    </div>
+  </div>
+  <div class="engine-step" data-step="4">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">ReduceScatter 输出</div>
+      <div class="engine-step-desc">将校正后的输出按 head 维度切分回各 DCP rank</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>DCP 通信模式包含四个步骤：</p>
+<ol>
+<li>AllGather Query — 沿 head 维度 all-gather Q，使每个 DCP rank 获得完整 query。</li>
+<li>本地 Attention — 用完整 Q 对本地 KV cache 做 attention，产出部分 output 和 LSE（log-sum-exp）。</li>
+<li>LSE 校正合并 — 用 LSE 值做数值校正，合并各 rank 的部分 attention 输出为完整结果。</li>
+<li>ReduceScatter 输出 — 将校正后的输出按 head 维度切分回各 DCP rank。</li>
+</ol>
+<h3>1. AllGather Query</h3>
+<p><code>get_dcp_group().all_gather(query, dim=1)</code> 沿 head 维度 all-gather Q，使每个 DCP rank 拥有完整的 query，可以对本地 KV cache 做 attention。
+<code>vllm/v1/attention/backends/flash_attn.py</code></p>
+<h3>2. 本地 Attention</h3>
+<p>用完整 Q 对本地 KV cache 做 attention，产出 context_attn_out 和 LSE（log-sum-exp）。同时用本地 Q 对新 token 做 query attention。
+<code>vllm/v1/attention/backends/flash_attn.py</code></p>
+<h3>3. LSE 校正合并</h3>
+<p>各 DCP rank 的 attention 输出需要用 LSE 做数值校正（因为每个 rank 只看到部分 KV，softmax 分母不同）。校正后合并 context 和 query attention 输出。
+<code>vllm/v1/attention/backends/flash_attn.py</code></p>
+<h3>4. ReduceScatter 校正输出</h3>
+<p>将 LSE 校正后的完整输出沿 head 维度 reduce_scatter，每个 DCP rank 取回属于自己的 head 切片。
+<code>vllm/v1/attention/backends/flash_attn.py</code></p>
+<h2>LSE 校正原理</h2>
+<p>每个 DCP rank 只看到部分 KV cache，独立计算 attention 时 softmax 分母不同，直接相加会引入数值误差。LSE（Log-Sum-Exp）校正解决了这个问题。</p>
+<p>每个 rank 计算部分 attention 后，同时产出 LSE 值（即 <code>log(sum(exp(attn_logits)))</code>）。校正过程：</p>
+<pre><code class="language-python">lse_max = max(lse_i for i in range(dcp_world_size))
+global_lse = log(sum(exp(lse_i - lse_max) for i in range(dcp_world_size))) + lse_max
+result = sum(output_i * exp(lse_i - global_lse) for i in range(dcp_world_size))
+</code></pre>
+<p>直觉理解：<code>exp(lse_i - global_lse)</code> 是每个 rank 的 attention 输出在全局 softmax 中的权重。LSE 校正等价于将各 rank 的部分 softmax 结果按正确的比例加权合并。</p>
+<p><code>vllm/v1/attention/backends/flash_attn.py</code></p>
+<h2>DCP 合并后端</h2>
+<p>LSE 校正合并有两种后端实现，核心区别在于通信次数：</p>
+<table>
+<thead>
+<tr>
+<th>后端</th>
+<th>NCCL 通信次数</th>
+<th>流程</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AG+RS</td>
+<td>3 次</td>
+<td>all_gather(LSE) + all_gather(output) → Triton LSE 校正 → reduce_scatter(corrected)</td>
+<td>通用</td>
+</tr>
+<tr>
+<td>A2A</td>
+<td>1 次</td>
+<td>Triton 打包 output+LSE → all_to_all_single → Triton 解包+LSE 加权合并</td>
+<td>低延迟优先</td>
+</tr>
+</tbody>
+</table>
+<p>AG+RS 后端分三步通信：先 all_gather LSE 值用于计算全局校正系数，再 all_gather 各 rank 的 attention 输出，Triton kernel 做 LSE 校正计算，最后 reduce_scatter 将结果切分回各 rank。</p>
+<p>A2A 后端将 output 和 LSE 打包到同一 buffer，用单次 all_to_all_single 通信完成数据交换，然后 Triton kernel 解包并直接做 LSE 加权合并。通信次数从 3 降为 1，显著降低延迟。</p>
+<p><code>vllm/v1/attention/ops/dcp_alltoall.py</code></p>
+<h2>A2A 实现</h2>
+<p>A2A 后端的核心函数 <code>dcp_a2a_lse_reduce()</code> 将 output 和 LSE 打包到同一 buffer，通过单次 all_to_all 完成交换，再解包并做 LSE 加权合并。</p>
+<h3>1. 打包 output + LSE</h3>
+<p>Triton kernel <code>_dcp_a2a_pack_send</code> 将每个 rank 的 attention output 和 LSE 值打包到连续 buffer。FP16 输出时每对 rank 间打包 2 个 LSE slot（FP16 占 2 字节，LSE 为 FP32 占 4 字节，2 个 LSE 刚好对齐）；FP32 输出时打包 1 个 LSE slot。
+<code>vllm/v1/attention/ops/dcp_alltoall.py</code></p>
+<h3>2. All-to-All 通信</h3>
+<p><code>torch.distributed.all_to_all_single</code> 单次集合通信，每个 rank 向所有其他 rank 发送不同的 output+LSE 数据块，同时接收其他 rank 的数据块。
+<code>vllm/v1/attention/ops/dcp_alltoall.py</code></p>
+<h3>3. 解包 + LSE 加权合并</h3>
+<p>Triton kernel <code>_dcp_a2a_unpack_combine</code> 解包接收到的 output+LSE 数据，用 LSE 值计算加权系数 <code>exp(lse_i - global_lse)</code>，对各 rank 的 output 做加权求和，得到校正后的完整 attention 输出。
+<code>vllm/v1/attention/ops/dcp_alltoall.py</code></p>
+<h2>PCP 通信模式</h2>
+<p>PCP 是独立于 TP 的并行维度，主要用于 MoE 模型的 prefill 加速。与 DCP 复用 TP GPU 不同，PCP 增加总 GPU 数量。GPU 进程布局为 <code>reshape(ExternalDP, DP, PP, PCP, TP)</code>。</p>
+<h3>1. MoE Dispatch 前：AllGather</h3>
+<p><code>get_pcp_group().all_gather(hidden_states, dim=0)</code> 沿 token 维度 all-gather，将分散在各 PCP rank 的 token 汇聚，使 MoE router 能看到完整 token 集合。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h3>2. MoE 本地计算</h3>
+<p>每个 PCP rank 对汇聚后的完整 token 集合执行 MoE dispatch → expert computation → MoE combine。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h3>3. MoE Combine 后：ReduceScatter</h3>
+<p><code>get_pcp_group().reduce_scatter(hidden_states, dim=0)</code> 沿 token 维度 reduce-scatter，将 MoE 计算结果重新切分到各 PCP rank。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h2>CP 与 TP/SP 的组合</h2>
+<table>
+<thead>
+<tr>
+<th>并行维度</th>
+<th>切分对象</th>
+<th>通信操作</th>
+<th>与 TP 的关系</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP</td>
+<td>权重（output/input 维度）</td>
+<td>all_reduce / all_gather</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SP</td>
+<td>激活值（序列/token 维度）</td>
+<td>reduce_scatter + all_gather</td>
+<td>TP 的附带优化，tp>1 时启用</td>
+</tr>
+<tr>
+<td>DCP</td>
+<td>KV cache（上下文序列）</td>
+<td>all_gather(Q) + LSE 校正 + reduce_scatter / all_to_all</td>
+<td>复用 TP GPU，tp_size % dcp_size == 0</td>
+</tr>
+<tr>
+<td>PCP</td>
+<td>Prefill token</td>
+<td>all_gather + reduce_scatter</td>
+<td>独立维度，增加 GPU 数</td>
+</tr>
+</tbody>
+</table>
+<p>组合约束：<code>total_cp = pcp_world_size × dcp_world_size</code>，<code>total_cp_rank = pcp_rank × dcp_world_size + dcp_rank</code>。KV cache 按 <code>total_cp_rank</code> 交错存储，确保 DCP 和 PCP 的 KV 切分互不冲突。</p>
+<p><code>vllm/distributed/parallel_state.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--dcp-size</code></td>
+<td>1</td>
+<td>DCP 组大小，需满足 tp_size % dcp_size == 0</td>
+</tr>
+<tr>
+<td><code>--dcp-comm-backend</code></td>
+<td>"ag_rs"</td>
+<td>DCP 合并后端：ag_rs（AllGather+ReduceScatter）或 a2a（All-to-All）</td>
+</tr>
+<tr>
+<td><code>--prefill-context-parallel-size</code></td>
+<td>1</td>
+<td>PCP 组大小，独立于 TP 增加 GPU 数</td>
+</tr>
+<tr>
+<td><code>--context-parallel-size</code></td>
+<td>1</td>
+<td>总 CP 大小（= pcp_size × dcp_size）</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

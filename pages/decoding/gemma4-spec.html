@@ -12,27 +12,376 @@
 <body data-page-id="gemma4-spec">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>Gemma4 投机解码</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">todo</span><span>10 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">draft</span><span>10 min</span></div>
       <h1>Gemma4 投机解码</h1>
-      <p class="hero-text">Gemma4 模型内置投机解码方案</p>
+      <p class="hero-text">Gemma4 内置 MTP 投机解码，<span data-term="跨模型 KV 共享" data-tip="Draft 层与 target model 共享 KV cache，避免重复存储。">跨模型 KV 共享</span> 使 draft 推理几乎零额外显存开销。</p>
       <div class="tags"><span class="tag">Gemma4</span><span class="tag">Speculative Decoding</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/gemma4-spec-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>Gemma4 的 draft 模型就像和高级律师共享同一个办公室的初级律师——他们共用同一套参考书（KV cache），不需要复制任何文件。初级律师审阅时直接翻阅高级律师已经整理好的笔记，几乎零额外存储开销。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model</div>
+    <div class="arch-box arch-highlight">KV Cache（共享）</div>
+    <div class="arch-row">
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↕</div>
+    <div class="arch-label">共享 KV Cache</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Draft MTP Layers</div>
+    <div class="arch-box">引用同一 block_table + kv_cache</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-box arch-highlight">零额外 KV 显存开销</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="gemma4-mental-model-html"><p>Gemma4 的心智模型：Target Model 和 Draft MTP Layers 共享同一份 KV Cache。Draft 层的 attention 直接引用 target model 的 block_table 和 kv_cache 张量，不需要分配额外的 KV 存储空间。这意味着 draft 推理的显存开销几乎为零。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>Gemma4 MTP 特殊设计</h2>
+      
+<p>Gemma4 的 MTP 实现有几个独特的优化设计，使其与其他 MTP 变体（DeepSeek、Step3.5）区分开来。</p>
+<h3>constant_draft_positions</h3>
+<p>Gemma4 设置 <code>constant_draft_positions = True</code>：所有 draft 步预测的 query 都来自<strong>同一个位置</strong>（Q-only attention）。这意味着 draft 层只计算新的 Q，而 K/V 完全复用 target model 已有的 KV cache。</p>
+<p><code>vllm/v1/spec_decode/gemma4.py</code></p>
+<pre><code class="language-python">class Gemma4Proposer(EagleProposer):
+    constant_draft_positions = True
+</code></pre>
+<h3>跨模型 KV 共享</h3>
+<p><code>_setup_gemma4_kv_sharing()</code> 是 Gemma4 的核心优化，将 draft 层的 attention 接线到 target model 的 KV cache：</p>
+<p><code>vllm/v1/spec_decode/gemma4.py</code></p>
+<pre><code class="language-python">def _setup_gemma4_kv_sharing(self, model):
+    for draft_layer in model.model.layers:
+        draft_attn = draft_layer.self_attn
+        target_kv_cache = get_target_kv_cache(draft_attn.layer_name)
+        draft_attn.kv_cache = target_kv_cache
+        draft_attn.block_table = get_target_block_table()
+</code></pre>
+<h3>多 KV Cache Group</h3>
+<p>Gemma4 模型有<strong>两种 attention 机制</strong>，对应不同的 KV cache group：</p>
+<table>
+<thead>
+<tr>
+<th>KV Cache Group</th>
+<th>类型</th>
+<th>Head 维度</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sliding Attention</td>
+<td>滑动窗口</td>
+<td>较小</td>
+<td>局部上下文</td>
+</tr>
+<tr>
+<td>Full Attention</td>
+<td>全量</td>
+<td>较大</td>
+<td>全局上下文</td>
+</tr>
+</tbody>
+</table>
+<p>Draft MTP 层需要同时与两个 group 的 KV cache 共享，这意味着每个 draft attention 层需要引用两套 block_table 和 kv_cache。</p>
+<h3>Centroids Masking</h3>
+<p>Gemma4 支持 centroids masking（中心点掩码）用于词汇表缩减，配合 CUDA graphs 使用：</p>
+<p><code>vllm/model_executor/models/gemma4_mtp.py</code></p>
+<pre><code class="language-python">if self.config.centroids_config is not None:
+    centroids_mask = compute_centroids_mask(logits, self.centroids)
+    logits = logits.masked_fill(~centroids_mask, -float('inf'))
+</code></pre>
+<p>通过限制候选 token 到一个子集，centroids masking 可以加速采样过程。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>KV 共享机制</h2>
+      
+<p>Gemma4 的 KV 共享是其最核心的设计优势。Draft attention 层直接引用 target model 的 KV cache 张量，无需任何额外分配。</p>
+<h3>共享原理</h3>
+<pre><code class="language-python">draft_attn.kv_cache[0] = target_attn.kv_cache[0]
+draft_attn.kv_cache[1] = target_attn.kv_cache[1]
+</code></pre>
+<h3>显存节省分析</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>无 KV 共享</th>
+<th>有 KV 共享</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Target KV Cache</td>
+<td>N blocks</td>
+<td>N blocks</td>
+</tr>
+<tr>
+<td>Draft KV Cache</td>
+<td>N blocks（额外）</td>
+<td>0 blocks（共享）</td>
+</tr>
+<tr>
+<td>总显存</td>
+<td>2N blocks</td>
+<td>N blocks</td>
+</tr>
+<tr>
+<td>节省</td>
+<td>—</td>
+<td>~50% KV 显存</td>
+</tr>
+</tbody>
+</table>
+<p>对于长序列（大 N），KV 共享带来的显存节省非常显著。Draft 推理只需少量额外显存用于 query 计算和中间激活值。</p>
+<h3>共享的一致性保证</h3>
+<p>KV 共享要求 draft 层和 target 层的 KV cache 布局完全一致：</p>
+<ul>
+<li>相同的 <code>block_table</code> 映射</li>
+<li>相同的 <code>kv_cache</code> 张量形状</li>
+<li>相同的 <code>block_size</code> 和 <code>head_dim</code></li>
+</ul>
+<p>Gemma4 的 MTP 层在设计时保证了这些约束，使得共享成为可能。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>mtp</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>Gemma4 MTP 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量（= MTP 层数）</td>
+</tr>
+</tbody>
+</table>
+<p>启动示例：</p>
+<pre><code class="language-bash">vllm serve google/gemma4-27b-it \
+  --speculative-method mtp \
+  --speculative-model google/gemma4-27b-it-mtp \
+  --num-speculative-tokens 4
+</code></pre>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>Gemma4 的 draft 模型就像和高级律师共享同一个办公室的初级律师——他们共用同一套参考书（KV cache），不需要复制任何文件。初级律师审阅时直接翻阅高级律师已经整理好的笔记，几乎零额外存储开销。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model</div>
+    <div class="arch-box arch-highlight">KV Cache（共享）</div>
+    <div class="arch-row">
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+      <div class="arch-box">K/V</div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↕</div>
+    <div class="arch-label">共享 KV Cache</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Draft MTP Layers</div>
+    <div class="arch-box">引用同一 block_table + kv_cache</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-box arch-highlight">零额外 KV 显存开销</div>
+  </div>
+</div>
+</code></pre>
+<p>Gemma4 的心智模型：Target Model 和 Draft MTP Layers 共享同一份 KV Cache。Draft 层的 attention 直接引用 target model 的 block_table 和 kv_cache 张量，不需要分配额外的 KV 存储空间。这意味着 draft 推理的显存开销几乎为零。</p>
+<h2>Gemma4 MTP 特殊设计</h2>
+<p>Gemma4 的 MTP 实现有几个独特的优化设计，使其与其他 MTP 变体（DeepSeek、Step3.5）区分开来。</p>
+<h3>constant_draft_positions</h3>
+<p>Gemma4 设置 <code>constant_draft_positions = True</code>：所有 draft 步预测的 query 都来自<strong>同一个位置</strong>（Q-only attention）。这意味着 draft 层只计算新的 Q，而 K/V 完全复用 target model 已有的 KV cache。</p>
+<p><code>vllm/v1/spec_decode/gemma4.py</code></p>
+<pre><code class="language-python">class Gemma4Proposer(EagleProposer):
+    constant_draft_positions = True
+</code></pre>
+<h3>跨模型 KV 共享</h3>
+<p><code>_setup_gemma4_kv_sharing()</code> 是 Gemma4 的核心优化，将 draft 层的 attention 接线到 target model 的 KV cache：</p>
+<p><code>vllm/v1/spec_decode/gemma4.py</code></p>
+<pre><code class="language-python">def _setup_gemma4_kv_sharing(self, model):
+    for draft_layer in model.model.layers:
+        draft_attn = draft_layer.self_attn
+        target_kv_cache = get_target_kv_cache(draft_attn.layer_name)
+        draft_attn.kv_cache = target_kv_cache
+        draft_attn.block_table = get_target_block_table()
+</code></pre>
+<h3>多 KV Cache Group</h3>
+<p>Gemma4 模型有<strong>两种 attention 机制</strong>，对应不同的 KV cache group：</p>
+<table>
+<thead>
+<tr>
+<th>KV Cache Group</th>
+<th>类型</th>
+<th>Head 维度</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sliding Attention</td>
+<td>滑动窗口</td>
+<td>较小</td>
+<td>局部上下文</td>
+</tr>
+<tr>
+<td>Full Attention</td>
+<td>全量</td>
+<td>较大</td>
+<td>全局上下文</td>
+</tr>
+</tbody>
+</table>
+<p>Draft MTP 层需要同时与两个 group 的 KV cache 共享，这意味着每个 draft attention 层需要引用两套 block_table 和 kv_cache。</p>
+<h3>Centroids Masking</h3>
+<p>Gemma4 支持 centroids masking（中心点掩码）用于词汇表缩减，配合 CUDA graphs 使用：</p>
+<p><code>vllm/model_executor/models/gemma4_mtp.py</code></p>
+<pre><code class="language-python">if self.config.centroids_config is not None:
+    centroids_mask = compute_centroids_mask(logits, self.centroids)
+    logits = logits.masked_fill(~centroids_mask, -float('inf'))
+</code></pre>
+<p>通过限制候选 token 到一个子集，centroids masking 可以加速采样过程。</p>
+<h2>KV 共享机制</h2>
+<p>Gemma4 的 KV 共享是其最核心的设计优势。Draft attention 层直接引用 target model 的 KV cache 张量，无需任何额外分配。</p>
+<h3>共享原理</h3>
+<pre><code class="language-python">draft_attn.kv_cache[0] = target_attn.kv_cache[0]
+draft_attn.kv_cache[1] = target_attn.kv_cache[1]
+</code></pre>
+<h3>显存节省分析</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>无 KV 共享</th>
+<th>有 KV 共享</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Target KV Cache</td>
+<td>N blocks</td>
+<td>N blocks</td>
+</tr>
+<tr>
+<td>Draft KV Cache</td>
+<td>N blocks（额外）</td>
+<td>0 blocks（共享）</td>
+</tr>
+<tr>
+<td>总显存</td>
+<td>2N blocks</td>
+<td>N blocks</td>
+</tr>
+<tr>
+<td>节省</td>
+<td>—</td>
+<td>~50% KV 显存</td>
+</tr>
+</tbody>
+</table>
+<p>对于长序列（大 N），KV 共享带来的显存节省非常显著。Draft 推理只需少量额外显存用于 query 计算和中间激活值。</p>
+<h3>共享的一致性保证</h3>
+<p>KV 共享要求 draft 层和 target 层的 KV cache 布局完全一致：</p>
+<ul>
+<li>相同的 <code>block_table</code> 映射</li>
+<li>相同的 <code>kv_cache</code> 张量形状</li>
+<li>相同的 <code>block_size</code> 和 <code>head_dim</code></li>
+</ul>
+<p>Gemma4 的 MTP 层在设计时保证了这些约束，使得共享成为可能。</p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>mtp</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>Gemma4 MTP 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量（= MTP 层数）</td>
+</tr>
+</tbody>
+</table>
+<p>启动示例：</p>
+<pre><code class="language-bash">vllm serve google/gemma4-27b-it \
+  --speculative-method mtp \
+  --speculative-model google/gemma4-27b-it-mtp \
+  --num-speculative-tokens 4
+</code></pre>
+</div>
+    </div>
+
   </main>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

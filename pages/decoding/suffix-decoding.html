@@ -12,27 +12,401 @@
 <body data-page-id="suffix-decoding">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>Suffix Decoding</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">todo</span><span>10 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">draft</span><span>10 min</span></div>
       <h1>Suffix Decoding</h1>
-      <p class="hero-text">基于后缀匹配的投机解码</p>
+      <p class="hero-text">基于 <span data-term="后缀树" data-tip="从 prompt 和已生成 token 构建的数据结构，可高效查找最长后缀匹配。">后缀树</span> 的模式匹配投机解码，无需神经模型。</p>
       <div class="tags"><span class="tag">Suffix Decoding</span><span class="tag">Speculative Decoding</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/suffix-decoding-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>后缀解码就像爵士乐手的即兴演奏：当乐手听到当前旋律与之前演奏过的某个片段相似时，会自然地延续那个片段之后的旋律。<code>SuffixDecodingCache</code> 从所有 token 构建后缀树，使得最长后缀匹配成为可能。</p>
+<pre class="diagram-raw"><div class="kv-mental-model">
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">后缀树（从所有 token 构建）</div>
+    <div class="kv-blocks">
+      <div class="arch-row">
+        <div class="arch-box arch-highlight">root</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box arch-module">"A"</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box arch-module">"B"</div>
+        <div class="arch-box arch-module">"C"</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box">→ [C, D, E]</div>
+        <div class="arch-box">→ [F, G]</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">当前后缀: A B</div>
+    <div class="kv-blocks">
+      <div class="arch-row">
+        <div class="arch-box arch-highlight">匹配 → C D E</div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="suffix-mental-model-html"><p>后缀解码的心智模型：SuffixDecodingCache 从 prompt 和已生成 token 构建后缀树。当需要预测 draft token 时，提取当前序列的后缀（如 "A B"），在后缀树中查找最长匹配路径，取其后续 token（C D E）作为 draft token。后缀树支持可变长度匹配，可以找到比固定窗口 n-gram 更长的模式。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>核心算法</h2>
+      
+<p><code>SuffixDecodingProposer.propose()</code> 的完整流程：</p>
+<div class="step-player" id="suffix-algorithm-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 5</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="suffix-algorithm-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>初始化请求</h3>对新请求调用 <code>start_request()</code>，从 prompt token 构建后缀树。
+<code class="step-ref">vllm/v1/spec_decode/suffix_decoding.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>追加已生成 token</h3>每步调用 <code>add_active_response()</code>，将新采样的 token 追加到后缀树中。
+<code class="step-ref">vllm/v1/spec_decode/suffix_decoding.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>提取最近 token</h3>提取最近的 token（最多 <code>max_tree_depth</code> 个）作为匹配后缀。
+<code class="step-ref">vllm/v1/spec_decode/suffix_decoding.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>后缀树匹配</h3>调用 <code>suffix_cache.speculate()</code>，在后缀树中查找最长匹配并返回 draft token。
+<code class="step-ref">vllm/v1/spec_decode/suffix_decoding.py</code>
+</div></div>
+<div class="step-item" id="step-5"><div class="step-num">5</div><div class="step-body"><h3>动态 draft 数量</h3>每个请求的 draft token 数量是动态的，取决于匹配到的模式长度。
+<code class="step-ref">vllm/v1/spec_decode/suffix_decoding.py</code>
+</div></div></div>
+<h3>SuffixDecodingCache</h3>
+<p>后缀树缓存的核心数据结构，负责构建和查询：</p>
+<p><code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<pre><code class="language-python">class SuffixDecodingCache:
+    def __init__(self, max_tree_depth, max_cached_requests, ...):
+        self.max_tree_depth = max_tree_depth
+        self.max_cached_requests = max_cached_requests
+
+    def speculate(self, request_id, recent_tokens, num_spec_tokens):
+        node = self.root
+        for token in reversed(recent_tokens):
+            if token not in node.children:
+                break
+            node = node.children[token]
+        return node.speculate_tokens(num_spec_tokens)
+</code></pre>
+<h3>动态 Draft Token 数量</h3>
+<p>与 n-gram 固定 k 个 draft token 不同，suffix decoding 的 draft 数量取决于匹配长度和 <code>max_spec_factor</code> 参数：</p>
+<pre><code class="language-python">num_spec = min(
+    len(matched_suffix) * max_spec_factor,
+    max_spec_tokens
+)
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>与 N-gram 的区别</h2>
+      
+<p>两者都是非神经方法，但数据结构和匹配策略不同：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>N-gram</th>
+<th>Suffix Decoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据结构</td>
+<td>滑动窗口（固定大小）</td>
+<td>后缀树（可变深度）</td>
+</tr>
+<tr>
+<td>匹配方式</td>
+<td>固定窗口内匹配</td>
+<td>最长后缀匹配</td>
+</tr>
+<tr>
+<td>匹配长度</td>
+<td>受 min_n/max_n 限制</td>
+<td>可匹配更长的模式</td>
+</tr>
+<tr>
+<td>Draft 数量</td>
+<td>固定 k</td>
+<td>动态（取决于匹配长度）</td>
+</tr>
+<tr>
+<td>GPU 实现</td>
+<td>有（NgramProposerGPU）</td>
+<td>无（纯 CPU）</td>
+</tr>
+<tr>
+<td>外部依赖</td>
+<td>无</td>
+<td>需要 <code>arctic-inference</code></td>
+</tr>
+<tr>
+<td>Token 更新</td>
+<td>不更新（无状态）</td>
+<td>实时更新后缀树</td>
+</tr>
+</tbody>
+</table>
+<h3>何时选择 Suffix Decoding</h3>
+<ul>
+<li>请求中有大量重复模式（如代码生成、模板化文本）</li>
+<li>匹配长度可能很长（n-gram 的 max_n 不够用）</li>
+<li>可以接受 CPU 开销和外部依赖</li>
+</ul>
+<h3>何时选择 N-gram</h3>
+<ul>
+<li>需要全 GPU 流水线（无 CPU 同步）</li>
+<li>不想引入额外依赖</li>
+<li>模式匹配长度较短</li>
+</ul>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>suffix</code></td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-tree-depth</code></td>
+<td>None</td>
+<td>后缀树最大深度</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-cached-requests</code></td>
+<td>None</td>
+<td>最大缓存请求数</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-spec-factor</code></td>
+<td>None</td>
+<td>Draft 数量 = 匹配长度 × 此因子</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-min-token-prob</code></td>
+<td>None</td>
+<td>候选 token 的最低概率阈值</td>
+</tr>
+</tbody>
+</table>
+<p><strong>注意</strong>：Suffix Decoding 需要 <code>arctic-inference</code> 包支持。</p>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>后缀解码就像爵士乐手的即兴演奏：当乐手听到当前旋律与之前演奏过的某个片段相似时，会自然地延续那个片段之后的旋律。<code>SuffixDecodingCache</code> 从所有 token 构建后缀树，使得最长后缀匹配成为可能。</p>
+<pre><code class="language-html"><div class="kv-mental-model">
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">后缀树（从所有 token 构建）</div>
+    <div class="kv-blocks">
+      <div class="arch-row">
+        <div class="arch-box arch-highlight">root</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box arch-module">"A"</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box arch-module">"B"</div>
+        <div class="arch-box arch-module">"C"</div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box">→ [C, D, E]</div>
+        <div class="arch-box">→ [F, G]</div>
+      </div>
+    </div>
+  </div>
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">当前后缀: A B</div>
+    <div class="kv-blocks">
+      <div class="arch-row">
+        <div class="arch-box arch-highlight">匹配 → C D E</div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>后缀解码的心智模型：SuffixDecodingCache 从 prompt 和已生成 token 构建后缀树。当需要预测 draft token 时，提取当前序列的后缀（如 "A B"），在后缀树中查找最长匹配路径，取其后续 token（C D E）作为 draft token。后缀树支持可变长度匹配，可以找到比固定窗口 n-gram 更长的模式。</p>
+<h2>核心算法</h2>
+<p><code>SuffixDecodingProposer.propose()</code> 的完整流程：</p>
+<h3>1. 初始化请求</h3>
+<p>对新请求调用 <code>start_request()</code>，从 prompt token 构建后缀树。
+<code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<h3>2. 追加已生成 token</h3>
+<p>每步调用 <code>add_active_response()</code>，将新采样的 token 追加到后缀树中。
+<code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<h3>3. 提取最近 token</h3>
+<p>提取最近的 token（最多 <code>max_tree_depth</code> 个）作为匹配后缀。
+<code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<h3>4. 后缀树匹配</h3>
+<p>调用 <code>suffix_cache.speculate()</code>，在后缀树中查找最长匹配并返回 draft token。
+<code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<h3>5. 动态 draft 数量</h3>
+<p>每个请求的 draft token 数量是动态的，取决于匹配到的模式长度。
+<code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<h3>SuffixDecodingCache</h3>
+<p>后缀树缓存的核心数据结构，负责构建和查询：</p>
+<p><code>vllm/v1/spec_decode/suffix_decoding.py</code></p>
+<pre><code class="language-python">class SuffixDecodingCache:
+    def __init__(self, max_tree_depth, max_cached_requests, ...):
+        self.max_tree_depth = max_tree_depth
+        self.max_cached_requests = max_cached_requests
+
+    def speculate(self, request_id, recent_tokens, num_spec_tokens):
+        node = self.root
+        for token in reversed(recent_tokens):
+            if token not in node.children:
+                break
+            node = node.children[token]
+        return node.speculate_tokens(num_spec_tokens)
+</code></pre>
+<h3>动态 Draft Token 数量</h3>
+<p>与 n-gram 固定 k 个 draft token 不同，suffix decoding 的 draft 数量取决于匹配长度和 <code>max_spec_factor</code> 参数：</p>
+<pre><code class="language-python">num_spec = min(
+    len(matched_suffix) * max_spec_factor,
+    max_spec_tokens
+)
+</code></pre>
+<h2>与 N-gram 的区别</h2>
+<p>两者都是非神经方法，但数据结构和匹配策略不同：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>N-gram</th>
+<th>Suffix Decoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据结构</td>
+<td>滑动窗口（固定大小）</td>
+<td>后缀树（可变深度）</td>
+</tr>
+<tr>
+<td>匹配方式</td>
+<td>固定窗口内匹配</td>
+<td>最长后缀匹配</td>
+</tr>
+<tr>
+<td>匹配长度</td>
+<td>受 min_n/max_n 限制</td>
+<td>可匹配更长的模式</td>
+</tr>
+<tr>
+<td>Draft 数量</td>
+<td>固定 k</td>
+<td>动态（取决于匹配长度）</td>
+</tr>
+<tr>
+<td>GPU 实现</td>
+<td>有（NgramProposerGPU）</td>
+<td>无（纯 CPU）</td>
+</tr>
+<tr>
+<td>外部依赖</td>
+<td>无</td>
+<td>需要 <code>arctic-inference</code></td>
+</tr>
+<tr>
+<td>Token 更新</td>
+<td>不更新（无状态）</td>
+<td>实时更新后缀树</td>
+</tr>
+</tbody>
+</table>
+<h3>何时选择 Suffix Decoding</h3>
+<ul>
+<li>请求中有大量重复模式（如代码生成、模板化文本）</li>
+<li>匹配长度可能很长（n-gram 的 max_n 不够用）</li>
+<li>可以接受 CPU 开销和外部依赖</li>
+</ul>
+<h3>何时选择 N-gram</h3>
+<ul>
+<li>需要全 GPU 流水线（无 CPU 同步）</li>
+<li>不想引入额外依赖</li>
+<li>模式匹配长度较短</li>
+</ul>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>suffix</code></td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-tree-depth</code></td>
+<td>None</td>
+<td>后缀树最大深度</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-cached-requests</code></td>
+<td>None</td>
+<td>最大缓存请求数</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-max-spec-factor</code></td>
+<td>None</td>
+<td>Draft 数量 = 匹配长度 × 此因子</td>
+</tr>
+<tr>
+<td><code>--suffix-decoding-min-token-prob</code></td>
+<td>None</td>
+<td>候选 token 的最低概率阈值</td>
+</tr>
+</tbody>
+</table>
+<p><strong>注意</strong>：Suffix Decoding 需要 <code>arctic-inference</code> 包支持。</p>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

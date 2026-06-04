@@ -12,27 +12,370 @@
 <body data-page-id="medusa">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>Medusa</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">todo</span><span>10 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">draft</span><span>10 min</span></div>
       <h1>Medusa</h1>
-      <p class="hero-text">多头像并行预测投机解码</p>
+      <p class="hero-text">在 target model 最后一层添加多个预测头，每个头独立预测不同未来位置的 token，<span data-term="单次 forward" data-tip="所有 draft token 在一次前向传播中并行生成，无需自回归。">单次 forward</span> 并行生成所有候选。</p>
       <div class="tags"><span class="tag">Medusa</span><span class="tag">Speculative Decoding</span><span class="tag">Multi-Head</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/medusa-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>Medusa 就像多个预言家同时预测未来：第一个预言家预测下一个词，第二个预测下下个词，第三个预测再下一个……所有预言家同时看同一份上下文，各自独立做出预测。一次 pass 就能得到所有位置的候选词。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram">
+    <div class="diagram-title">Target Hidden States</div>
+    <div class="arch-row">
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 0</div>
+        <div class="muted">→ t+1: A</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 1</div>
+        <div class="muted">→ t+2: B</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 2</div>
+        <div class="muted">→ t+3: C</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 3</div>
+        <div class="muted">→ t+4: D</div>
+      </div>
+    </div>
+    <div class="arch-highlight">Draft: A B C D（一次 forward）</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="medusa-mental-model-html"><p>Medusa 的心智模型：多个预测头（Head 0-3）同时从 target model 的 hidden states 中读取信息，每个头独立预测不同未来位置（t+1 到 t+4）的 token。所有预测在一次 forward pass 中完成，无需自回归循环。最终 Draft 为 A B C D。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>Medusa 核心思路</h2>
+      
+<p>Medusa 在 target model 最后一层 hidden states 之上添加<strong>多个预测头</strong>。每个头独立预测不同未来位置的 token，<strong>单次 forward pass</strong> 生成所有 draft token（并行，非自回归）。</p>
+<p>与自回归方法（EAGLE、draft model）的关键区别：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Medusa</th>
+<th>自回归方法（EAGLE 等）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Draft 生成方式</td>
+<td>并行，单次 forward</td>
+<td>顺序，k 次 forward</td>
+</tr>
+<tr>
+<td>每步延迟</td>
+<td>低（1 次 draft forward）</td>
+<td>高（k 次 draft forward）</td>
+</tr>
+<tr>
+<td>接受率</td>
+<td>较低（无 token 间依赖）</td>
+<td>较高（后续 token 基于前面 token）</td>
+</tr>
+<tr>
+<td>总体加速</td>
+<td>取决于接受率与延迟的权衡</td>
+<td>取决于接受率与 draft 开销的权衡</td>
+</tr>
+</tbody>
+</table>
+<p>Medusa 的核心权衡：<strong>用更低的接受率换取更快的 proposal 速度</strong>。如果 target model 的 forward 开销远大于 draft 开销，Medusa 的单次 proposal 更高效。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>实现细节</h2>
+      
+<p><code>MedusaProposer.propose()</code> 的实现简洁明了：</p>
+<p><code>vllm/v1/spec_decode/medusa.py</code></p>
+<pre><code class="language-python">class MedusaProposer(SpecDecodeBaseProposer):
+    def propose(self, target_hidden_states, ...):
+        hidden_states = self.model(target_hidden_states)
+        logits = self.compute_logits(hidden_states.blocks)
+        draft_tokens = logits.argmax(dim=-1)
+        return draft_tokens
+</code></pre>
+<h3>执行步骤</h3>
+<ol>
+<li>运行 <code>self.model(target_hidden_states)</code>：Medusa 模型处理 target 的 hidden states</li>
+<li><code>compute_logits(blocks)</code>：计算每个预测头的 logits</li>
+<li><code>argmax</code> per head：每个头取概率最大的 token</li>
+<li>Stack 为 <code>[batch_size, num_heads]</code>：组装为 draft token 矩阵</li>
+</ol>
+<h3>关键特点</h3>
+<ul>
+<li><strong>始终贪心</strong>：Medusa 使用 argmax（贪心解码），不做随机采样</li>
+<li><strong>不存储 draft logits</strong>：因为贪心模式不需要 p(x)/q(x) 计算</li>
+<li><strong>无 KV cache</strong>：Medusa 模型本身不需要 KV cache，因为它不做自回归</li>
+<li><strong>并行度高</strong>：所有 draft token 一次生成，延迟与 num_speculative_tokens 无关</li>
+</ul>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram">
+    <div class="engine-step-flow">
+      <div class="engine-step">
+        <div class="engine-step-num">1</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Medusa Model Forward</div>
+          <div class="engine-step-desc">hidden_states = model(target_hidden_states)</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">2</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Compute Logits</div>
+          <div class="engine-step-desc">每个 head 计算各自的 logits</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">3</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Argmax Per Head</div>
+          <div class="engine-step-desc">每个 head 取概率最大的 token</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">4</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Stack Draft Tokens</div>
+          <div class="engine-step-desc">[batch_size, num_heads]</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="medusa-impl-flow-html"><p>Medusa 实现流程包含 4 个步骤：</p>
+<ol>
+<li><strong>Medusa Model Forward</strong>：将 target_hidden_states 传入 Medusa 模型，得到处理后的 hidden_states。</li>
+<li><strong>Compute Logits</strong>：每个预测头独立计算 logits。</li>
+<li><strong>Argmax Per Head</strong>：每个头取概率最大的 token（贪心解码）。</li>
+<li><strong>Stack Draft Tokens</strong>：将所有头的预测结果 stack 为 [batch_size, num_heads] 的 draft token 矩阵。
+整个过程只有一次 forward，没有自回归循环。</li>
+</ol>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>medusa</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>Medusa 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量（= Medusa head 数）</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>Medusa 就像多个预言家同时预测未来：第一个预言家预测下一个词，第二个预测下下个词，第三个预测再下一个……所有预言家同时看同一份上下文，各自独立做出预测。一次 pass 就能得到所有位置的候选词。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram">
+    <div class="diagram-title">Target Hidden States</div>
+    <div class="arch-row">
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 0</div>
+        <div class="muted">→ t+1: A</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 1</div>
+        <div class="muted">→ t+2: B</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 2</div>
+        <div class="muted">→ t+3: C</div>
+      </div>
+      <div class="arch-box">
+        <div class="arch-proc-title">Head 3</div>
+        <div class="muted">→ t+4: D</div>
+      </div>
+    </div>
+    <div class="arch-highlight">Draft: A B C D（一次 forward）</div>
+  </div>
+</div>
+</code></pre>
+<p>Medusa 的心智模型：多个预测头（Head 0-3）同时从 target model 的 hidden states 中读取信息，每个头独立预测不同未来位置（t+1 到 t+4）的 token。所有预测在一次 forward pass 中完成，无需自回归循环。最终 Draft 为 A B C D。</p>
+<h2>Medusa 核心思路</h2>
+<p>Medusa 在 target model 最后一层 hidden states 之上添加<strong>多个预测头</strong>。每个头独立预测不同未来位置的 token，<strong>单次 forward pass</strong> 生成所有 draft token（并行，非自回归）。</p>
+<p>与自回归方法（EAGLE、draft model）的关键区别：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Medusa</th>
+<th>自回归方法（EAGLE 等）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Draft 生成方式</td>
+<td>并行，单次 forward</td>
+<td>顺序，k 次 forward</td>
+</tr>
+<tr>
+<td>每步延迟</td>
+<td>低（1 次 draft forward）</td>
+<td>高（k 次 draft forward）</td>
+</tr>
+<tr>
+<td>接受率</td>
+<td>较低（无 token 间依赖）</td>
+<td>较高（后续 token 基于前面 token）</td>
+</tr>
+<tr>
+<td>总体加速</td>
+<td>取决于接受率与延迟的权衡</td>
+<td>取决于接受率与 draft 开销的权衡</td>
+</tr>
+</tbody>
+</table>
+<p>Medusa 的核心权衡：<strong>用更低的接受率换取更快的 proposal 速度</strong>。如果 target model 的 forward 开销远大于 draft 开销，Medusa 的单次 proposal 更高效。</p>
+<h2>实现细节</h2>
+<p><code>MedusaProposer.propose()</code> 的实现简洁明了：</p>
+<p><code>vllm/v1/spec_decode/medusa.py</code></p>
+<pre><code class="language-python">class MedusaProposer(SpecDecodeBaseProposer):
+    def propose(self, target_hidden_states, ...):
+        hidden_states = self.model(target_hidden_states)
+        logits = self.compute_logits(hidden_states.blocks)
+        draft_tokens = logits.argmax(dim=-1)
+        return draft_tokens
+</code></pre>
+<h3>执行步骤</h3>
+<ol>
+<li>运行 <code>self.model(target_hidden_states)</code>：Medusa 模型处理 target 的 hidden states</li>
+<li><code>compute_logits(blocks)</code>：计算每个预测头的 logits</li>
+<li><code>argmax</code> per head：每个头取概率最大的 token</li>
+<li>Stack 为 <code>[batch_size, num_heads]</code>：组装为 draft token 矩阵</li>
+</ol>
+<h3>关键特点</h3>
+<ul>
+<li><strong>始终贪心</strong>：Medusa 使用 argmax（贪心解码），不做随机采样</li>
+<li><strong>不存储 draft logits</strong>：因为贪心模式不需要 p(x)/q(x) 计算</li>
+<li><strong>无 KV cache</strong>：Medusa 模型本身不需要 KV cache，因为它不做自回归</li>
+<li><strong>并行度高</strong>：所有 draft token 一次生成，延迟与 num_speculative_tokens 无关</li>
+</ul>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram">
+    <div class="engine-step-flow">
+      <div class="engine-step">
+        <div class="engine-step-num">1</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Medusa Model Forward</div>
+          <div class="engine-step-desc">hidden_states = model(target_hidden_states)</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">2</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Compute Logits</div>
+          <div class="engine-step-desc">每个 head 计算各自的 logits</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">3</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Argmax Per Head</div>
+          <div class="engine-step-desc">每个 head 取概率最大的 token</div>
+        </div>
+      </div>
+      <div class="engine-step">
+        <div class="engine-step-num">4</div>
+        <div class="engine-step-content">
+          <div class="engine-step-title">Stack Draft Tokens</div>
+          <div class="engine-step-desc">[batch_size, num_heads]</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Medusa 实现流程包含 4 个步骤：</p>
+<ol>
+<li><strong>Medusa Model Forward</strong>：将 target_hidden_states 传入 Medusa 模型，得到处理后的 hidden_states。</li>
+<li><strong>Compute Logits</strong>：每个预测头独立计算 logits。</li>
+<li><strong>Argmax Per Head</strong>：每个头取概率最大的 token（贪心解码）。</li>
+<li><strong>Stack Draft Tokens</strong>：将所有头的预测结果 stack 为 [batch_size, num_heads] 的 draft token 矩阵。
+整个过程只有一次 forward，没有自回归循环。</li>
+</ol>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>medusa</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>Medusa 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量（= Medusa head 数）</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,287 @@
+---
+id: deepseek-mla
+title: DeepSeek MLA
+category: models
+level: advanced
+status: draft
+readingMinutes: 14
+tags:
+  - DeepSeek
+  - MLA
+  - MoE
+codeRefs:
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/layers/mla.py
+heroText: "[MLA](term:Multi-head Latent Attention，将 KV 压缩到低维隐向量再存入 cache，大幅减少显存占用。) 将 KV 压缩到低维隐向量，MoE 路由使用 grouped top-k 和 noaux_tc 评分。"
+---
+
+## 心智模型
+
+标准 attention 为每个 head 存储完整的 K 和 V（就像保存每本书的全文）。MLA 在存储前把 K/V 压缩成简短摘要（隐向量），只在 attention 计算时才展开回完整维度。就像只保存书籍大纲而非全文——书架空间大幅减少，但需要时仍能重建内容。
+
+:::diagram mla-mental-model
+```html
+<div class="diagram-container">
+  <div class="diagram" data-ref="vllm/model_executor/layers/mla.py">
+    <div class="diagram-title">MLA vs 标准 Attention</div>
+    <div class="cache-flow">
+      <div class="cache-step">
+        <div class="cache-step-num">1</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">标准 Attention</div>
+          <div class="cache-step-desc">Hidden State → K, V (num_heads × head_dim) → 直接存入 KV Cache，每个 head 存储完整 K 和 V，大显存占用</div>
+        </div>
+      </div>
+      <div class="cache-step">
+        <div class="cache-step-num">2</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">MLA</div>
+          <div class="cache-step-desc">Hidden State → 压缩 (kv_lora_rank) → KV Cache（小显存占用）→ 展开回完整 K, V → Attention</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+:::
+
+:::diagram-desc mla-mental-model
+MLA vs 标准 Attention 对比图展示了两种 attention 的存储差异：
+
+**标准 Attention**：Hidden State → K, V（num_heads × head_dim 维度）→ 直接存入 KV Cache。每个 head 存储完整的 K 和 V，显存占用大。
+
+**MLA**：Hidden State → 压缩到 kv_lora_rank 维度的隐向量 → 存入 KV Cache（显存占用小）→ attention 时展开回完整 K, V → 计算 attention。
+
+关键收益：KV cache 显存占用大幅减少（DeepSeek V3 约 32x 压缩），支持更长上下文。
+:::
+
+关键收益：**KV cache 显存占用大幅减少**（DeepSeek V3 约 32x 压缩），支持更长上下文。
+
+## MLA 核心流程
+
+DeepSeek V2/V3 的 MLA 实现包含 Q 压缩、KV 压缩、旋转编码三个关键步骤：
+
+:::diagram mla-core-flow
+```html
+<div class="diagram-container">
+  <div class="diagram" data-ref="vllm/model_executor/models/deepseek_v2.py">
+    <div class="diagram-title">MLA 核心流程</div>
+    <div class="sched-flow">
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">Q 压缩</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">fused_qkv_a_proj <span class="muted">hidden → [q_lora_rank, kv_lora_rank + qk_rope_head_dim]</span></div>
+          <div class="sched-step">q_a_layernorm</div>
+          <div class="sched-step">q_b_proj <span class="muted">→ num_heads × qk_head_dim</span></div>
+        </div>
+      </div>
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">KV 压缩</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">kv_a_proj_with_mqa <span class="muted">hidden → kv_lora_rank + qk_rope_head_dim</span></div>
+          <div class="sched-step">Split: kv_c + k_pe</div>
+          <div class="sched-step">kv_a_layernorm(kv_c)</div>
+          <div class="sched-step">kv_c_normed <span class="muted">存入 KV Cache</span></div>
+        </div>
+      </div>
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">旋转编码</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">RoPE(q_pe, k_pe) <span class="muted">仅对 RoPE 维度应用</span></div>
+        </div>
+      </div>
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">KV 展开</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">kv_b_proj <span class="muted">kv_c_normed → num_heads × (qk_head_dim + v_head_dim)</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+:::
+
+:::diagram-desc mla-core-flow
+MLA 核心流程展示了 DeepSeek V2/V3 的 attention 计算步骤：
+
+**Q 压缩**：fused_qkv_a_proj 将 hidden state 投影到低维空间，q_a_layernorm 归一化后，q_b_proj 展开到 num_heads × qk_head_dim 维度。
+
+**KV 压缩**：kv_a_proj_with_mqa 将 hidden state 压缩到 kv_lora_rank + qk_rope_head_dim 维度，拆分为 kv_c（压缩的 KV）和 k_pe（位置编码）。kv_a_layernorm 归一化 kv_c，得到 kv_c_normed。**只有 kv_c_normed 存入 KV cache**，大幅减少显存占用。
+
+**旋转编码**：RoPE 仅应用于 q_pe 和 k_pe（RoPE 维度），不应用于压缩的 KV。
+
+**KV 展开**：attention 计算时，kv_b_proj 将 kv_c_normed 展开回完整的 K 和 V 维度。
+:::
+
+```python
+# vllm/model_executor/models/deepseek_v2.py
+# DeepseekV2MLAAttention.forward() 核心流程（简化版）
+def forward(self, hidden_states, positions):
+    # Q 压缩
+    qkv = self.fused_qkv_a_proj(hidden_states)
+    q, kv_c, k_pe = split_qkv(qkv)
+    q = self.q_a_layernorm(q)
+    q = self.q_b_proj(q)
+    
+    # KV 压缩
+    kv_c_normed = self.kv_a_layernorm(kv_c)
+    # kv_c_normed 存入 KV cache
+    
+    # 旋转编码
+    q_pe, k_pe = apply_rotary_emb(q_pe, k_pe, positions)
+    
+    # KV 展开（attention 时）
+    kv = self.kv_b_proj(kv_c_normed)
+    k, v = split_kv(kv)
+    
+    # Attention 计算
+    output = attention(q, k, v)
+    return output
+```
+
+## KV Cache 节省
+
+MLA 的核心优势是 KV cache 显存占用大幅减少。以 DeepSeek V3 为例：
+
+| 指标 | 标准 Attention | MLA | 压缩比 |
+|------|---------------|-----|--------|
+| num_kv_heads | 128 | 1（MLA 视为单 head） | - |
+| head_size | 128 | 512（kv_lora_rank） | - |
+| 每 token 存储 | 2 × 128 × 128 = 32768 | 512 + 64 = 576 | **~57x** |
+
+MLAAttentionSpec 配置：
+
+```python
+# vllm/model_executor/layers/mla.py
+MLAAttentionSpec(
+    num_kv_heads=1,
+    head_size=kv_lora_rank,  # 512 for DeepSeek V3
+)
+```
+
+MLA 将多个 head 的 KV 压缩到一个低维隐向量，存储时视为单个 head，但 attention 时展开回所有 head。
+
+## DeepSeek V3.2 稀疏注意力
+
+DeepSeek V3.2 引入了稀疏注意力机制，通过 Indexer 选择 top-k 相关 token：
+
+```python
+# vllm/model_executor/models/deepseek_v2.py
+# DeepseekV32IndexerCache: 自定义 KV cache 用于 indexer
+class DeepseekV32IndexerCache:
+    def __init__(self, config):
+        self.indexer_spec = MLAAttentionSpec(
+            num_kv_heads=config.index_n_heads,
+            head_size=kv_lora_rank,
+        )
+        self.topk_tokens = config.index_topk
+```
+
+- **Indexer**：FP8 量化的 Q 和 K，用于高效的 top-k token 选择
+- **topk_tokens**：从配置中读取，如 `index_topk=4096`
+- **n_head**：indexer 的 head 数，如 `index_n_heads=1`
+- **use_index_cache**：可选，缓存 top-k 结果跨层复用
+
+稀疏注意力减少了 attention 计算量，对长上下文场景收益显著。
+
+## MoE 结构
+
+DeepSeek V2/V3 采用混合专家（MoE）架构，路由使用 grouped top-k 和 noaux_tc 评分：
+
+:::diagram mla-moe-arch
+```html
+<div class="diagram-container">
+  <div class="diagram" data-ref="vllm/model_executor/models/deepseek_v2.py">
+    <div class="diagram-title">DeepSeek MoE 结构</div>
+    <div class="cache-flow">
+      <div class="cache-step">
+        <div class="cache-step-num">1</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">Hidden State</div>
+          <div class="cache-step-desc">输入隐状态</div>
+        </div>
+      </div>
+      <div class="cache-step">
+        <div class="cache-step-num">2</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">Router</div>
+          <div class="cache-step-desc">Grouped Top-K: n_group × topk_group | scoring_func: "softmax" / "noaux_tc"</div>
+        </div>
+      </div>
+      <div class="cache-step">
+        <div class="cache-step-num">3</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">Experts</div>
+          <div class="cache-step-desc">Shared Expert（所有 token 都经过）+ n_routed_experts (e.g., 256) 路由专家，token 被路由到其中 top_k 个</div>
+        </div>
+      </div>
+      <div class="cache-step">
+        <div class="cache-step-num">4</div>
+        <div class="cache-step-content">
+          <div class="cache-step-title">加权聚合输出</div>
+          <div class="cache-step-desc">routed_scaling_factor 调整路由专家权重，路由专家输出与共享专家输出相加</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+:::
+
+:::diagram-desc mla-moe-arch
+DeepSeek MoE 结构展示了混合专家架构的关键组件：
+
+**Router**：使用 grouped top-k 路由，将 token 分配到 n_group 个组，每组选择 topk_group 个专家。scoring_func 支持 "softmax"（标准路由）和 "noaux_tc"（DeepSeek V3 的 bias-corrected 路由，减少辅助损失）。
+
+**Experts**：包含 n_shared_experts（如 1 个共享专家，所有 token 都经过）和 n_routed_experts（如 256 个路由专家，token 被路由到其中 top_k 个）。
+
+**输出聚合**：路由专家的输出乘以 routed_scaling_factor 后与共享专家输出相加，实现加权聚合。
+
+**Expert Parallelism**：支持 ep_size 参数进行专家并行，EPLB（Expert Parallelism Load Balancing）优化负载均衡。
+:::
+
+```python
+# vllm/model_executor/models/deepseek_v2.py
+# DeepseekV2MoE 配置
+@dataclass
+class DeepseekV2MoEConfig:
+    n_routed_experts: int = 256      # 路由专家数
+    n_shared_experts: int = 1        # 共享专家数
+    top_k: int = 8                   # 每个 token 激活的专家数
+    n_group: int = 8                 # 分组数
+    topk_group: int = 4              # 每组选择的专家数
+    scoring_func: str = "noaux_tc"   # 评分函数
+    routed_scaling_factor: float = 1.0  # 路由专家缩放因子
+    ep_size: int = 1                 # 专家并行大小
+```
+
+## Min-Latency 融合 GEMM
+
+DeepSeek V3 针对小 batch 场景优化了 QKV 投影的 GEMM：
+
+```python
+# vllm/model_executor/models/deepseek_v2.py
+# DeepSeekV2FusedQkvAProjLinear: 自定义融合 GEMM
+class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
+    def forward(self, x):
+        if num_tokens <= 16 and is_h100_or_later:
+            # 使用 PDL 优化的 dsv3_fused_a_gemm kernel
+            return dsv3_fused_a_gemm(x, self.weight, self.scale)
+        return super().forward(x)
+```
+
+- **条件**：`num_tokens <= 16` 且 GPU 为 H100+/Blackwell
+- **内核**：`dsv3_fused_a_gemm`，使用 PDL（Programmable Deep Learning）优化
+- **收益**：小 batch 场景下延迟显著降低
+
+## 关键配置
+
+| 参数 | 默认值 | 说明 | 源码 |
+|------|--------|------|------|
+| `--model` | - | DeepSeek 模型路径 | model_config.py |
+| `--tensor-parallel-size` | 1 | 张量并行大小 | parallel_config.py |
+| `--expert-parallel-size` | 1 | 专家并行大小 | parallel_config.py |
+| `--quantization` | None | 量化方法（推荐 fp8） | quantization_config.py |
+| `--enable-eplb` | False | 是否启用 EPLB 负载均衡 | deepseek_v2.py |
+| `--max-model-len` | 自动 | 最大上下文长度 | model_config.py |

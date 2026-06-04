@@ -12,27 +12,449 @@
 <body data-page-id="ngram">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>N-gram 投机解码</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">todo</span><span>10 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>intermediate</span><span class="status">draft</span><span>10 min</span></div>
       <h1>N-gram 投机解码</h1>
-      <p class="hero-text">N-gram proposer 专题占位</p>
+      <p class="hero-text">无需神经模型，通过 <span data-term="n-gram 匹配" data-tip="在已生成 token 序列中查找与当前后缀最长的 n-gram 模式，用其后续 token 作为候选。">n-gram 匹配</span> 在已有 token 序列中找到模式并预测后续 token。</p>
       <div class="tags"><span class="tag">Ngram</span><span class="tag">Speculative Decoding</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/ngram-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>N-gram 投机解码就像手机输入法的联想补全：当你在一段文字中看到"不仅如此"，系统发现在之前的文本中"不仅如此"后面总是跟着"而且"，就建议"而且"作为下一个词。纯模式匹配，不需要任何神经网络。</p>
+<pre class="diagram-raw"><div class="kv-mental-model">
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">已生成序列</div>
+    <div class="kv-blocks">
+      <span class="kv-block kv-block-used">A</span>
+      <span class="kv-block kv-block-used">B</span>
+      <span class="kv-block kv-block-cached">C</span>
+      <span class="kv-block kv-block-cached">D</span>
+      <span class="kv-block kv-block-free">?</span>
+    </div>
+  </div>
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">查找后缀 "C D"</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">... C D E F ...</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">预测</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">E F G</div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="ngram-mental-model-html"><p>N-gram 投机解码的心智模型：在已生成序列的末尾提取后缀（如 "C D"），在序列中搜索该后缀之前出现的位置，取出其后续的 token（如 E F G）作为 draft token。这是纯模式匹配，不需要任何神经网络推理。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>CPU N-gram 算法</h2>
+      
+<p>CPU 版本使用 KMP 类似算法查找最长匹配的 n-gram 模式。</p>
+<div class="step-player" id="ngram-cpu-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 4</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="ngram-cpu-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>反转 token 序列</h3>将已生成的 token 序列反转，方便从末尾向前匹配。
+<code class="step-ref">vllm/v1/spec_decode/ngram_proposer.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>计算 LPS 数组</h3>使用类似 KMP 的算法计算 Longest Proper Prefix which is also Suffix 数组。
+<code class="step-ref">vllm/v1/spec_decode/ngram_proposer.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>查找最长匹配</h3>在 [min_n, max_n] 范围内找到最长的有效 n-gram 匹配。
+<code class="step-ref">vllm/v1/spec_decode/ngram_proposer.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>提取候选 token</h3>从匹配位置提取 k 个后续 token 作为 draft。
+<code class="step-ref">vllm/v1/spec_decode/ngram_proposer.py</code>
+</div></div></div>
+<p>核心函数 <code>_find_longest_matched_ngram_and_propose_tokens()</code> 使用 Numba JIT 加速，将 Python 循环编译为机器码以获得可接受的性能。</p>
+<p><code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<pre><code class="language-python">@numba.jit(nopython=True)
+def _find_longest_matched_ngram_and_propose_tokens(
+    context, max_n, min_n, num_proposals
+):
+    reversed_context = context[::-1]
+    lps = compute_lps(reversed_context)
+    longest_match_length = 0
+    longest_match_pos = 0
+    for i in range(len(lps)):
+        match_len = lps[i]
+        if min_n <= match_len <= max_n and match_len > longest_match_length:
+            longest_match_length = match_len
+            longest_match_pos = i
+    if longest_match_length > 0:
+        start = longest_match_pos + 1
+        return context[start:start + num_proposals]
+    return []
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>GPU N-gram 算法</h2>
+      
+<p>GPU 版本（<code>NgramProposerGPU</code>）完全向量化，无需 CPU 同步，适合异步调度。</p>
+<pre class="diagram-raw"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">unfold() 滑动窗口</div>
+      <div class="engine-step-desc">生成所有 n-gram 的滑动窗口视图</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">布尔匹配</div>
+      <div class="engine-step-desc">比较每个窗口与当前后缀 → boolean mask</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">argmax 选择</div>
+      <div class="engine-step-desc">跨 n-gram size 选择最长匹配</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">提取 draft tokens</div>
+      <div class="engine-step-desc">用 masking 提取匹配位置后的 k 个 token</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="ngram-gpu-flow-html"><p>GPU N-gram 算法流程包含 4 个步骤：</p>
+<ol>
+<li><strong>unfold() 滑动窗口</strong>：对 token 序列执行 unfold 操作，生成所有 n-gram 的滑动窗口视图。</li>
+<li><strong>布尔匹配</strong>：将每个窗口与当前后缀比较，生成 boolean mask。</li>
+<li><strong>argmax 选择</strong>：跨不同 n-gram size 选择最长匹配的位置。</li>
+<li><strong>提取 draft tokens</strong>：用 masking 从匹配位置提取后续 k 个 token 作为 draft。
+整个过程在 GPU 上完成，无需 CPU 同步。</li>
+</ol>
+</template>
+<h3>核心实现</h3>
+<p><code>NgramGPUKernel</code> 是一个 <code>nn.Module</code>，支持 <code>@support_torch_compile</code>：</p>
+<p><code>vllm/v1/spec_decode/ngram_proposer_gpu.py</code></p>
+<pre><code class="language-python">class NgramGPUKernel(nn.Module):
+    @support_torch_compile
+    def forward(self, input_ids, ...):
+        for n in range(self.min_n, self.max_n + 1):
+            windows = input_ids.unfold(dimension=1, size=n, step=1)
+            suffix = input_ids[:, -n:]
+            matches = (windows == suffix).all(dim=-1)
+            best_match_pos = matches.argmax(dim=-1)
+        draft_tokens = extract_tokens(best_match_pos, num_proposals)
+        return draft_tokens
+</code></pre>
+<h3>CPU vs GPU 对比</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>CPU 版本</th>
+<th>GPU 版本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>算法</td>
+<td>KMP-like + LPS</td>
+<td>unfold + boolean match + argmax</td>
+</tr>
+<tr>
+<td>加速</td>
+<td>Numba JIT</td>
+<td>Torch compile</td>
+</tr>
+<tr>
+<td>CPU 同步</td>
+<td>需要将序列传到 CPU</td>
+<td>完全在 GPU 上</td>
+</tr>
+<tr>
+<td>异步调度</td>
+<td>不兼容</td>
+<td>兼容</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>小 batch / 调试</td>
+<td>生产环境</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>ngram</code></td>
+</tr>
+<tr>
+<td><code>--prompt-lookup-min</code></td>
+<td>1</td>
+<td>N-gram 最小匹配长度（min_n）</td>
+</tr>
+<tr>
+<td><code>--prompt-lookup-max</code></td>
+<td>3</td>
+<td>N-gram 最大匹配长度（max_n）</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+</tbody>
+</table>
+<p>启动示例：</p>
+<pre><code class="language-bash">vllm serve model_name \
+  --speculative-method ngram \
+  --num-speculative-tokens 5 \
+  --prompt-lookup-min 1 \
+  --prompt-lookup-max 3
+</code></pre>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>N-gram 投机解码就像手机输入法的联想补全：当你在一段文字中看到"不仅如此"，系统发现在之前的文本中"不仅如此"后面总是跟着"而且"，就建议"而且"作为下一个词。纯模式匹配，不需要任何神经网络。</p>
+<pre><code class="language-html"><div class="kv-mental-model">
+  <div class="kv-gpu-memory">
+    <div class="kv-gpu-title">已生成序列</div>
+    <div class="kv-blocks">
+      <span class="kv-block kv-block-used">A</span>
+      <span class="kv-block kv-block-used">B</span>
+      <span class="kv-block kv-block-cached">C</span>
+      <span class="kv-block kv-block-cached">D</span>
+      <span class="kv-block kv-block-free">?</span>
+    </div>
+  </div>
+  <div class="kv-data-structures">
+    <div class="kv-ds">
+      <div class="kv-ds-title">查找后缀 "C D"</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">... C D E F ...</div>
+      </div>
+    </div>
+    <div class="kv-ds">
+      <div class="kv-ds-title">预测</div>
+      <div class="kv-ds-items">
+        <div class="kv-ds-item">E F G</div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>N-gram 投机解码的心智模型：在已生成序列的末尾提取后缀（如 "C D"），在序列中搜索该后缀之前出现的位置，取出其后续的 token（如 E F G）作为 draft token。这是纯模式匹配，不需要任何神经网络推理。</p>
+<h2>CPU N-gram 算法</h2>
+<p>CPU 版本使用 KMP 类似算法查找最长匹配的 n-gram 模式。</p>
+<h3>1. 反转 token 序列</h3>
+<p>将已生成的 token 序列反转，方便从末尾向前匹配。
+<code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<h3>2. 计算 LPS 数组</h3>
+<p>使用类似 KMP 的算法计算 Longest Proper Prefix which is also Suffix 数组。
+<code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<h3>3. 查找最长匹配</h3>
+<p>在 [min_n, max_n] 范围内找到最长的有效 n-gram 匹配。
+<code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<h3>4. 提取候选 token</h3>
+<p>从匹配位置提取 k 个后续 token 作为 draft。
+<code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<p>核心函数 <code>_find_longest_matched_ngram_and_propose_tokens()</code> 使用 Numba JIT 加速，将 Python 循环编译为机器码以获得可接受的性能。</p>
+<p><code>vllm/v1/spec_decode/ngram_proposer.py</code></p>
+<pre><code class="language-python">@numba.jit(nopython=True)
+def _find_longest_matched_ngram_and_propose_tokens(
+    context, max_n, min_n, num_proposals
+):
+    reversed_context = context[::-1]
+    lps = compute_lps(reversed_context)
+    longest_match_length = 0
+    longest_match_pos = 0
+    for i in range(len(lps)):
+        match_len = lps[i]
+        if min_n <= match_len <= max_n and match_len > longest_match_length:
+            longest_match_length = match_len
+            longest_match_pos = i
+    if longest_match_length > 0:
+        start = longest_match_pos + 1
+        return context[start:start + num_proposals]
+    return []
+</code></pre>
+<h2>GPU N-gram 算法</h2>
+<p>GPU 版本（<code>NgramProposerGPU</code>）完全向量化，无需 CPU 同步，适合异步调度。</p>
+<pre><code class="language-html"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">unfold() 滑动窗口</div>
+      <div class="engine-step-desc">生成所有 n-gram 的滑动窗口视图</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">布尔匹配</div>
+      <div class="engine-step-desc">比较每个窗口与当前后缀 → boolean mask</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">argmax 选择</div>
+      <div class="engine-step-desc">跨 n-gram size 选择最长匹配</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">提取 draft tokens</div>
+      <div class="engine-step-desc">用 masking 提取匹配位置后的 k 个 token</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>GPU N-gram 算法流程包含 4 个步骤：</p>
+<ol>
+<li><strong>unfold() 滑动窗口</strong>：对 token 序列执行 unfold 操作，生成所有 n-gram 的滑动窗口视图。</li>
+<li><strong>布尔匹配</strong>：将每个窗口与当前后缀比较，生成 boolean mask。</li>
+<li><strong>argmax 选择</strong>：跨不同 n-gram size 选择最长匹配的位置。</li>
+<li><strong>提取 draft tokens</strong>：用 masking 从匹配位置提取后续 k 个 token 作为 draft。
+整个过程在 GPU 上完成，无需 CPU 同步。</li>
+</ol>
+<h3>核心实现</h3>
+<p><code>NgramGPUKernel</code> 是一个 <code>nn.Module</code>，支持 <code>@support_torch_compile</code>：</p>
+<p><code>vllm/v1/spec_decode/ngram_proposer_gpu.py</code></p>
+<pre><code class="language-python">class NgramGPUKernel(nn.Module):
+    @support_torch_compile
+    def forward(self, input_ids, ...):
+        for n in range(self.min_n, self.max_n + 1):
+            windows = input_ids.unfold(dimension=1, size=n, step=1)
+            suffix = input_ids[:, -n:]
+            matches = (windows == suffix).all(dim=-1)
+            best_match_pos = matches.argmax(dim=-1)
+        draft_tokens = extract_tokens(best_match_pos, num_proposals)
+        return draft_tokens
+</code></pre>
+<h3>CPU vs GPU 对比</h3>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>CPU 版本</th>
+<th>GPU 版本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>算法</td>
+<td>KMP-like + LPS</td>
+<td>unfold + boolean match + argmax</td>
+</tr>
+<tr>
+<td>加速</td>
+<td>Numba JIT</td>
+<td>Torch compile</td>
+</tr>
+<tr>
+<td>CPU 同步</td>
+<td>需要将序列传到 CPU</td>
+<td>完全在 GPU 上</td>
+</tr>
+<tr>
+<td>异步调度</td>
+<td>不兼容</td>
+<td>兼容</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>小 batch / 调试</td>
+<td>生产环境</td>
+</tr>
+</tbody>
+</table>
+<h2>配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>ngram</code></td>
+</tr>
+<tr>
+<td><code>--prompt-lookup-min</code></td>
+<td>1</td>
+<td>N-gram 最小匹配长度（min_n）</td>
+</tr>
+<tr>
+<td><code>--prompt-lookup-max</code></td>
+<td>3</td>
+<td>N-gram 最大匹配长度（max_n）</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+</tbody>
+</table>
+<p>启动示例：</p>
+<pre><code class="language-bash">vllm serve model_name \
+  --speculative-method ngram \
+  --num-speculative-tokens 5 \
+  --prompt-lookup-min 1 \
+  --prompt-lookup-max 3
+</code></pre>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

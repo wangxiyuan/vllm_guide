@@ -12,27 +12,433 @@
 <body data-page-id="eagle">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>EAGLE</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">todo</span><span>12 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">draft</span><span>12 min</span></div>
       <h1>EAGLE</h1>
-      <p class="hero-text">EAGLE 系列投机解码专题占位</p>
+      <p class="hero-text">利用 target model 的 <span data-term="hidden states" data-tip="Transformer 最后一层的输出向量，包含了丰富的语义信息。">hidden states</span> 作为轻量 draft model 的输入，自回归生成候选 token。</p>
       <div class="tags"><span class="tag">EAGLE</span><span class="tag">Speculative Decoding</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/eagle-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>EAGLE 就像一个精明的助理，他不仅看高级律师的最终文件，还阅读律师的详细笔记（hidden states）。笔记包含了比最终文本丰富得多的信息——每个词的语义倾向、语法角色、上下文关联。有了这些笔记，助理的草稿准确率远高于只看最终文本。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model 输出</div>
+    <div class="arch-box arch-highlight">Hidden States（丰富语义）</div>
+    <div class="arch-box">Token IDs（离散文本）</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">→</div>
+    <div class="arch-label">双重输入</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">EAGLE Head（轻量）</div>
+    <div class="arch-flow-label">自回归生成 k 个 draft token</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">→</div>
+    <div class="arch-label">候选 token</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model</div>
+    <div class="arch-flow-label">一次 forward 验证</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="eagle-mental-model-html"><p>EAGLE 的心智模型展示了其双重输入策略：Target Model 的 Hidden States（包含丰富语义信息）和 Token IDs（离散文本）同时作为 EAGLE Head 的输入。EAGLE Head 是一个轻量模型，自回归生成 k 个 draft token，然后提交给 Target Model 一次 forward 验证。Hidden States 提供了比纯文本更丰富的上下文信息，使得 EAGLE 的 draft 准确率显著高于仅使用 token ID 的方法。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>EAGLE 核心思路</h2>
+      
+<p>EAGLE 的核心创新在于利用 target model 的 <strong>hidden states</strong> 作为 draft model 的输入，而非仅使用 token embedding。Hidden states 包含了比 token ID 丰富得多的语义信息，使得 draft token 的接受率大幅提升。</p>
+<p>关键设计：</p>
+<ul>
+<li><code>pass_hidden_states_to_model = True</code>：target model 的 hidden states 被传递给 EAGLE 模型</li>
+<li>V1 中使用 <code>SpecDecodeBaseProposer.propose()</code> 作为统一接口</li>
+<li>EAGLE 模型是一个轻量的自回归模型，参数量远小于 target model</li>
+</ul>
+<p><code>vllm/v1/spec_decode/eagle.py</code></p>
+<pre><code class="language-python">class EagleProposer(SpecDecodeBaseProposer):
+    def __init__(self, ...):
+        self.model = model
+        self.pass_hidden_states_to_model = True
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Draft 生成流程</h2>
+      
+<p>EAGLE 通过自回归方式逐个生成 draft token。每一步都利用上一步的 hidden states 更新输入。</p>
+<pre class="diagram-raw"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">set_inputs_first_pass</div>
+      <div class="engine-step-desc">shift target token_ids +1, 插入 next_token_ids, 复制 hidden_states</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">First Forward</div>
+      <div class="engine-step-desc">EAGLE model forward → 第一个 draft token 的 logits</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">First Sample</div>
+      <div class="engine-step-desc">采样第一个 draft token</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Autoregressive Loop</div>
+      <div class="engine-step-desc">更新 input_ids/positions/attention → forward → sample → 重复 k-1 次</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">5</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Return Draft</div>
+      <div class="engine-step-desc">[batch_size, num_speculative_tokens]</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="eagle-draft-flow-html"><p>EAGLE Draft 生成流程包含 5 个步骤：</p>
+<ol>
+<li><strong>set_inputs_first_pass</strong>：将 target token_ids 右移一位，在最后位置插入 next_token_ids，复制 target hidden_states 作为 EAGLE 模型的初始输入。</li>
+<li><strong>First Forward</strong>：EAGLE 模型执行前向传播，产出第一个 draft token 位置的 logits。</li>
+<li><strong>First Sample</strong>：从 logits 中采样第一个 draft token。</li>
+<li><strong>Autoregressive Loop</strong>：将采样的 token 更新到 input_ids、positions 和 attention mask 中，再次 forward 并采样，重复 k-1 次直到生成所有 draft token。</li>
+<li><strong>Return Draft</strong>：返回形状为 [batch_size, num_speculative_tokens] 的 draft token 矩阵。</li>
+</ol>
+</template>
+<div class="step-player" id="eagle-draft-steps"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 5</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="eagle-draft-steps-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>准备首次输入</h3><code>set_inputs_first_pass()</code>：shift target token_ids +1，插入 next_token_ids，复制 hidden_states。
+<code class="step-ref">vllm/v1/spec_decode/eagle.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>EAGLE 首次 Forward</h3>运行 EAGLE model forward，获得第一个 draft 位置的 logits。
+<code class="step-ref">vllm/v1/spec_decode/eagle.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>首次采样</h3>从 logits 采样第一个 draft token。
+<code class="step-ref">vllm/v1/spec_decode/eagle.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>自回归循环</h3>更新 input_ids、positions、attention，forward + sample，重复 k-1 次。
+<code class="step-ref">vllm/v1/spec_decode/eagle.py</code>
+</div></div>
+<div class="step-item" id="step-5"><div class="step-num">5</div><div class="step-body"><h3>返回 Draft Tokens</h3>返回 [batch_size, num_speculative_tokens] 的 draft token 矩阵。
+<code class="step-ref">vllm/v1/spec_decode/eagle.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>EAGLE3 扩展</h2>
+      
+<p>EAGLE3 在 EAGLE 基础上引入<strong>辅助 hidden states</strong>——不仅使用最后一层的 hidden states，还利用中间层的输出。</p>
+<ul>
+<li><code>combine_hidden_states()</code>：将多个层的 hidden states 拼接作为 EAGLE3 模型的输入</li>
+<li>通过 <code>speculative_config.method == "eagle3"</code> 检测 EAGLE3 模式</li>
+<li>中间层的 hidden states 提供了不同抽象级别的语义信息，进一步提升 draft 准确率</li>
+</ul>
+<p><code>vllm/v1/spec_decode/eagle.py</code></p>
+<pre><code class="language-python">def combine_hidden_states(self, hidden_states_list):
+    return torch.cat(hidden_states_list, dim=-1)
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>概率采样 vs 贪心</h2>
+      
+<p>EAGLE 的 proposer 采样方法影响 draft 质量和接受率：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>策略</th>
+<th>Draft Logits 存储</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>greedy</code></td>
+<td>argmax</td>
+<td>不存储</td>
+<td>速度快，但 acceptance rate 略低</td>
+</tr>
+<tr>
+<td><code>probabilistic</code></td>
+<td>随机采样</td>
+<td>存储</td>
+<td>acceptance rate 更高（用于 rejection sampling 的 p(x)/q(x) 计算）</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/spec_decode/llm_base_proposer.py</code></p>
+<pre><code class="language-python">if self.draft_sample_method == "greedy":
+    draft_tokens = logits.argmax(dim=-1)
+else:
+    draft_tokens = torch.multinomial(probs, num_samples=1)
+    self.draft_logits = logits
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>EAGLE 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>eagle</code> 或 <code>eagle3</code></td>
+</tr>
+<tr>
+<td><code>--draft-sample-method</code></td>
+<td>"greedy"</td>
+<td>greedy / probabilistic</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>EAGLE 就像一个精明的助理，他不仅看高级律师的最终文件，还阅读律师的详细笔记（hidden states）。笔记包含了比最终文本丰富得多的信息——每个词的语义倾向、语法角色、上下文关联。有了这些笔记，助理的草稿准确率远高于只看最终文本。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model 输出</div>
+    <div class="arch-box arch-highlight">Hidden States（丰富语义）</div>
+    <div class="arch-box">Token IDs（离散文本）</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">→</div>
+    <div class="arch-label">双重输入</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">EAGLE Head（轻量）</div>
+    <div class="arch-flow-label">自回归生成 k 个 draft token</div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">→</div>
+    <div class="arch-label">候选 token</div>
+  </div>
+  <div class="arch-proc">
+    <div class="arch-proc-title">Target Model</div>
+    <div class="arch-flow-label">一次 forward 验证</div>
+  </div>
+</div>
+</code></pre>
+<p>EAGLE 的心智模型展示了其双重输入策略：Target Model 的 Hidden States（包含丰富语义信息）和 Token IDs（离散文本）同时作为 EAGLE Head 的输入。EAGLE Head 是一个轻量模型，自回归生成 k 个 draft token，然后提交给 Target Model 一次 forward 验证。Hidden States 提供了比纯文本更丰富的上下文信息，使得 EAGLE 的 draft 准确率显著高于仅使用 token ID 的方法。</p>
+<h2>EAGLE 核心思路</h2>
+<p>EAGLE 的核心创新在于利用 target model 的 <strong>hidden states</strong> 作为 draft model 的输入，而非仅使用 token embedding。Hidden states 包含了比 token ID 丰富得多的语义信息，使得 draft token 的接受率大幅提升。</p>
+<p>关键设计：</p>
+<ul>
+<li><code>pass_hidden_states_to_model = True</code>：target model 的 hidden states 被传递给 EAGLE 模型</li>
+<li>V1 中使用 <code>SpecDecodeBaseProposer.propose()</code> 作为统一接口</li>
+<li>EAGLE 模型是一个轻量的自回归模型，参数量远小于 target model</li>
+</ul>
+<p><code>vllm/v1/spec_decode/eagle.py</code></p>
+<pre><code class="language-python">class EagleProposer(SpecDecodeBaseProposer):
+    def __init__(self, ...):
+        self.model = model
+        self.pass_hidden_states_to_model = True
+</code></pre>
+<h2>Draft 生成流程</h2>
+<p>EAGLE 通过自回归方式逐个生成 draft token。每一步都利用上一步的 hidden states 更新输入。</p>
+<pre><code class="language-html"><div class="engine-step-flow">
+  <div class="engine-step">
+    <div class="engine-step-num">1</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">set_inputs_first_pass</div>
+      <div class="engine-step-desc">shift target token_ids +1, 插入 next_token_ids, 复制 hidden_states</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">2</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">First Forward</div>
+      <div class="engine-step-desc">EAGLE model forward → 第一个 draft token 的 logits</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">3</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">First Sample</div>
+      <div class="engine-step-desc">采样第一个 draft token</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">4</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Autoregressive Loop</div>
+      <div class="engine-step-desc">更新 input_ids/positions/attention → forward → sample → 重复 k-1 次</div>
+    </div>
+  </div>
+  <div class="engine-step">
+    <div class="engine-step-num">5</div>
+    <div class="engine-step-content">
+      <div class="engine-step-title">Return Draft</div>
+      <div class="engine-step-desc">[batch_size, num_speculative_tokens]</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>EAGLE Draft 生成流程包含 5 个步骤：</p>
+<ol>
+<li><strong>set_inputs_first_pass</strong>：将 target token_ids 右移一位，在最后位置插入 next_token_ids，复制 target hidden_states 作为 EAGLE 模型的初始输入。</li>
+<li><strong>First Forward</strong>：EAGLE 模型执行前向传播，产出第一个 draft token 位置的 logits。</li>
+<li><strong>First Sample</strong>：从 logits 中采样第一个 draft token。</li>
+<li><strong>Autoregressive Loop</strong>：将采样的 token 更新到 input_ids、positions 和 attention mask 中，再次 forward 并采样，重复 k-1 次直到生成所有 draft token。</li>
+<li><strong>Return Draft</strong>：返回形状为 [batch_size, num_speculative_tokens] 的 draft token 矩阵。</li>
+</ol>
+<h3>1. 准备首次输入</h3>
+<p><code>set_inputs_first_pass()</code>：shift target token_ids +1，插入 next_token_ids，复制 hidden_states。
+<code>vllm/v1/spec_decode/eagle.py</code></p>
+<h3>2. EAGLE 首次 Forward</h3>
+<p>运行 EAGLE model forward，获得第一个 draft 位置的 logits。
+<code>vllm/v1/spec_decode/eagle.py</code></p>
+<h3>3. 首次采样</h3>
+<p>从 logits 采样第一个 draft token。
+<code>vllm/v1/spec_decode/eagle.py</code></p>
+<h3>4. 自回归循环</h3>
+<p>更新 input_ids、positions、attention，forward + sample，重复 k-1 次。
+<code>vllm/v1/spec_decode/eagle.py</code></p>
+<h3>5. 返回 Draft Tokens</h3>
+<p>返回 [batch_size, num_speculative_tokens] 的 draft token 矩阵。
+<code>vllm/v1/spec_decode/eagle.py</code></p>
+<h2>EAGLE3 扩展</h2>
+<p>EAGLE3 在 EAGLE 基础上引入<strong>辅助 hidden states</strong>——不仅使用最后一层的 hidden states，还利用中间层的输出。</p>
+<ul>
+<li><code>combine_hidden_states()</code>：将多个层的 hidden states 拼接作为 EAGLE3 模型的输入</li>
+<li>通过 <code>speculative_config.method == "eagle3"</code> 检测 EAGLE3 模式</li>
+<li>中间层的 hidden states 提供了不同抽象级别的语义信息，进一步提升 draft 准确率</li>
+</ul>
+<p><code>vllm/v1/spec_decode/eagle.py</code></p>
+<pre><code class="language-python">def combine_hidden_states(self, hidden_states_list):
+    return torch.cat(hidden_states_list, dim=-1)
+</code></pre>
+<h2>概率采样 vs 贪心</h2>
+<p>EAGLE 的 proposer 采样方法影响 draft 质量和接受率：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>策略</th>
+<th>Draft Logits 存储</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>greedy</code></td>
+<td>argmax</td>
+<td>不存储</td>
+<td>速度快，但 acceptance rate 略低</td>
+</tr>
+<tr>
+<td><code>probabilistic</code></td>
+<td>随机采样</td>
+<td>存储</td>
+<td>acceptance rate 更高（用于 rejection sampling 的 p(x)/q(x) 计算）</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/v1/spec_decode/llm_base_proposer.py</code></p>
+<pre><code class="language-python">if self.draft_sample_method == "greedy":
+    draft_tokens = logits.argmax(dim=-1)
+else:
+    draft_tokens = torch.multinomial(probs, num_samples=1)
+    self.draft_logits = logits
+</code></pre>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>EAGLE 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>eagle</code> 或 <code>eagle3</code></td>
+</tr>
+<tr>
+<td><code>--draft-sample-method</code></td>
+<td>"greedy"</td>
+<td>greedy / probabilistic</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

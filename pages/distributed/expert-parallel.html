@@ -12,27 +12,561 @@
 <body data-page-id="expert-parallel">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>distributed</span><span>/</span><span>Expert Parallel</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">todo</span><span>12 min</span></div>
+      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">draft</span><span>12 min</span></div>
       <h1>Expert Parallel</h1>
-      <p class="hero-text">MoE 专家切分、路由和 all-to-all</p>
+      <p class="hero-text">MoE 专家分布到多个 GPU，路由器决定每个 token 去哪个专家，<span data-term="all-to-all" data-tip="每个 GPU 向所有其他 GPU 发送不同数据并接收不同数据的集合通信。">all-to-all</span> 完成专家调度与结果回收。</p>
       <div class="tags"><span class="tag">Expert Parallel</span><span class="tag">MoE</span><span class="tag">All To All</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/expert-parallel-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象一家大公司有很多专业部门（专家）。每个办公室（GPU）驻扎几个部门。当请求进来时，路由器决定哪些部门应该处理它。请求被转发（dispatch）到对应的办公室，处理后结果汇总（combine）回来——这就是 Expert Parallel 的核心流程。</p>
+<pre class="diagram-raw"><div class="comm-panorama">
+  <div class="comm-proc">
+    <div class="comm-proc-title">输入 Token</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-expert="0">T0→E0</div>
+      <div class="comm-node" data-expert="2">T1→E2</div>
+      <div class="comm-node" data-expert="1">T2→E1</div>
+      <div class="comm-node" data-expert="0">T3→E0</div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">→</div>
+      <div class="comm-label">Dispatch (All2All)</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">专家计算</div>
+    <div class="comm-proc-body">
+      <div class="comm-node">
+        GPU 0
+        <div class="comm-node-sub">E0, E1</div>
+      </div>
+      <div class="comm-node">
+        GPU 1
+        <div class="comm-node-sub">E2, E3</div>
+      </div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">→</div>
+      <div class="comm-label">Combine (All2All)</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">输出 Token</div>
+    <div class="comm-proc-body">
+      <div class="comm-node">T0&#x27;</div>
+      <div class="comm-node">T1&#x27;</div>
+      <div class="comm-node">T2&#x27;</div>
+      <div class="comm-node">T3&#x27;</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="ep-mental-model-html"><p>Expert Parallel 的核心流程：</p>
+<p><strong>输入 Token</strong>：每个 token 被路由器分配到特定专家（如 T0→E0, T1→E2, T2→E1, T3→E0）。</p>
+<p><strong>Dispatch (All2All)</strong>：通过 all-to-all 通信，将 token 发送到其目标专家所在的 GPU。例如 E0 在 GPU 0，则 T0 和 T3 被发送到 GPU 0；E2 在 GPU 1，则 T1 被发送到 GPU 1。</p>
+<p><strong>专家计算</strong>：每个 GPU 对接收到的 token 执行本地专家计算。GPU 0 执行 E0 和 E1，GPU 1 执行 E2 和 E3。</p>
+<p><strong>Combine (All2All)</strong>：通过 all-to-all 通信（反向），将专家输出结果发送回原始 token 所在的 GPU，按路由器权重加权求和。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>EP 组构造</h2>
+      
+<p>EP 组跨越 DP×PCP×TP 维度，在每个 PP rank 内部构造。构造逻辑：</p>
+<pre><code class="language-python">all_ranks = torch.arange(world_size).reshape(ExternalDP, DP, PP, PCP, TP)
+ep_ranks = all_ranks.transpose(1, 2).reshape(-1, DP * PCP * TP).unbind(0)
+</code></pre>
+<p>每个 EP rank 持有 <code>n_routed_experts / ep_size</code> 个专家。例如 8 个路由专家、4 个 EP rank，则每个 rank 持有 2 个专家。</p>
+<p><code>vllm/distributed/parallel_state.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Expert Map Manager</h2>
+      
+<p><code>FusedMoE</code> 层管理专家映射关系，核心数据结构：</p>
+<table>
+<thead>
+<tr>
+<th>数据结构</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>expert_map</code></td>
+<td>全局专家 ID → 本地 ID（-1 表示不在本 rank）</td>
+</tr>
+<tr>
+<td><code>routing_tables</code></td>
+<td>global_to_physical, physical_to_global, local_to_global 映射</td>
+</tr>
+<tr>
+<td><code>local_num_experts</code></td>
+<td>本 rank 持有的专家数量</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+for local_id, global_id in enumerate(local_expert_ids):
+    expert_map[global_id] = local_id
+</code></pre>
+<p>路由器输出的专家 ID 是全局 ID，通过 <code>expert_map</code> 转换为本地 ID。若映射为 -1，表示该专家不在本 rank，需要通过 all-to-all 发送到其他 rank。</p>
+<p><code>vllm/model_executor/layers/fused_moe/layer.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Dispatch-Combine 流程</h2>
+      
+<div class="step-player" id="ep-dispatch-combine"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 5</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="ep-dispatch-combine-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>Router 计算 top-k 专家</h3>Router 对每个 token 计算 expert scores，选择 top-k 个专家及其权重。输出 <code>topk_ids</code>（专家全局 ID）和 <code>topk_weights</code>（路由权重）。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/layer.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>Dispatch：All2All 发送 token</h3>根据 <code>topk_ids</code>，将 token 发送到目标专家所在的 EP rank。all-to-all 通信后，每个 rank 收到需要由本地专家处理的 token。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>本地专家计算</h3>每个 EP rank 对接收到的 token 执行本地专家的 forward pass。专家计算通常是 GEMM（gate_proj, up_proj, down_proj）。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>Combine：All2All 收集结果</h3>反向 all-to-all 通信，将专家输出结果发送回原始 token 所在的 EP rank。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div>
+<div class="step-item" id="step-5"><div class="step-num">5</div><div class="step-body"><h3>加权求和</h3>按 <code>topk_weights</code> 对各专家的输出做加权求和，得到最终 MoE 输出。
+<code class="step-ref">vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>All2All 后端</h2>
+      
+<p>vLLM 支持多种 All2All 后端实现，针对不同硬件和场景优化：</p>
+<table>
+<thead>
+<tr>
+<th>后端</th>
+<th>特点</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DeepEP HT</td>
+<td>High-Throughput，高吞吐量</td>
+<td>大 batch、吞吐优先</td>
+</tr>
+<tr>
+<td>DeepEP LL</td>
+<td>Low-Latency，FP8 dispatch</td>
+<td>低延迟、FP8 量化</td>
+</tr>
+<tr>
+<td>MoRI</td>
+<td>I/O based，绕过 NVLink</td>
+<td>跨节点、网络传输</td>
+</tr>
+<tr>
+<td>FlashInfer NVLink 2-sided</td>
+<td>FlashInfer 实现，双向 NVLink</td>
+<td>单节点、NVLink</td>
+</tr>
+<tr>
+<td>FlashInfer NVLink 1-sided</td>
+<td>FlashInfer 实现，单向 NVLink</td>
+<td>单节点、优化延迟</td>
+</tr>
+<tr>
+<td>NIXL EP</td>
+<td>NVIDIA NIXL 库</td>
+<td>NVIDIA GPU</td>
+</tr>
+<tr>
+<td>Naive</td>
+<td>AllGather + ReduceScatter 回退</td>
+<td>无专用 all2all kernel</td>
+</tr>
+<tr>
+<td>None</td>
+<td>无 EP（所有专家在单 GPU）</td>
+<td>ep_size=1</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Naive DP+EP 回退</h2>
+      
+<p>当没有专用 all-to-all kernel 时，使用 Naive 后端回退到 AllGather + ReduceScatter：</p>
+<p><strong>Dispatch 阶段</strong>：</p>
+<ol>
+<li>AllGather：将所有 EP rank 的 token 汇聚到每个 rank</li>
+<li>每个 rank 根据本地专家 ID 筛选需要处理的 token</li>
+</ol>
+<p><strong>Combine 阶段</strong>：</p>
+<ol>
+<li>每个 rank 计算本地专家输出</li>
+<li>ReduceScatter：将输出按 token 维度切分回各 rank</li>
+</ol>
+<p>Naive 后端通信量更高（AllGather + ReduceScatter 各一次），但实现简单，无需专用 kernel。</p>
+<p><code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>EPLB 负载均衡</h2>
+      
+<p>Expert Parallelism Load Balancing（EPLB）通过冗余专家实现负载均衡。启用后，部分专家会被复制到多个 rank，根据负载动态调整专家分布。</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_eplb</code></td>
+<td>启用 EPLB</td>
+</tr>
+<tr>
+<td><code>num_redundant_experts</code></td>
+<td>冗余专家数量</td>
+</tr>
+<tr>
+<td><code>ep_rebalance_interval</code></td>
+<td>重平衡间隔（步数）</td>
+</tr>
+</tbody>
+</table>
+<p>EPLB 统计各专家的负载（处理的 token 数），定期重新分配专家到不同 rank，使各 rank 负载更均衡。</p>
+<p><code>vllm/model_executor/layers/fused_moe/layer.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--expert-parallel-size</code></td>
+<td>1</td>
+<td>EP 组大小，决定专家分布到多少 GPU</td>
+</tr>
+<tr>
+<td><code>--enable-eplb</code></td>
+<td>False</td>
+<td>启用 EPLB 负载均衡</td>
+</tr>
+<tr>
+<td><code>--num-redundant-experts</code></td>
+<td>0</td>
+<td>冗余专家数量（用于 EPLB）</td>
+</tr>
+<tr>
+<td><code>--ep-revise-role</code></td>
+<td>-</td>
+<td>EP 角色修订（调试用）</td>
+</tr>
+<tr>
+<td><code>--moe-all2all-backend</code></td>
+<td>auto</td>
+<td>All2All 后端选择</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象一家大公司有很多专业部门（专家）。每个办公室（GPU）驻扎几个部门。当请求进来时，路由器决定哪些部门应该处理它。请求被转发（dispatch）到对应的办公室，处理后结果汇总（combine）回来——这就是 Expert Parallel 的核心流程。</p>
+<pre><code class="language-html"><div class="comm-panorama">
+  <div class="comm-proc">
+    <div class="comm-proc-title">输入 Token</div>
+    <div class="comm-proc-body">
+      <div class="comm-node" data-expert="0">T0→E0</div>
+      <div class="comm-node" data-expert="2">T1→E2</div>
+      <div class="comm-node" data-expert="1">T2→E1</div>
+      <div class="comm-node" data-expert="0">T3→E0</div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">→</div>
+      <div class="comm-label">Dispatch (All2All)</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">专家计算</div>
+    <div class="comm-proc-body">
+      <div class="comm-node">
+        GPU 0
+        <div class="comm-node-sub">E0, E1</div>
+      </div>
+      <div class="comm-node">
+        GPU 1
+        <div class="comm-node-sub">E2, E3</div>
+      </div>
+    </div>
+  </div>
+  <div class="comm-channel-group">
+    <div class="comm-channel-item">
+      <div class="comm-arrow">→</div>
+      <div class="comm-label">Combine (All2All)</div>
+    </div>
+  </div>
+  <div class="comm-proc">
+    <div class="comm-proc-title">输出 Token</div>
+    <div class="comm-proc-body">
+      <div class="comm-node">T0'</div>
+      <div class="comm-node">T1'</div>
+      <div class="comm-node">T2'</div>
+      <div class="comm-node">T3'</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Expert Parallel 的核心流程：</p>
+<p><strong>输入 Token</strong>：每个 token 被路由器分配到特定专家（如 T0→E0, T1→E2, T2→E1, T3→E0）。</p>
+<p><strong>Dispatch (All2All)</strong>：通过 all-to-all 通信，将 token 发送到其目标专家所在的 GPU。例如 E0 在 GPU 0，则 T0 和 T3 被发送到 GPU 0；E2 在 GPU 1，则 T1 被发送到 GPU 1。</p>
+<p><strong>专家计算</strong>：每个 GPU 对接收到的 token 执行本地专家计算。GPU 0 执行 E0 和 E1，GPU 1 执行 E2 和 E3。</p>
+<p><strong>Combine (All2All)</strong>：通过 all-to-all 通信（反向），将专家输出结果发送回原始 token 所在的 GPU，按路由器权重加权求和。</p>
+<h2>EP 组构造</h2>
+<p>EP 组跨越 DP×PCP×TP 维度，在每个 PP rank 内部构造。构造逻辑：</p>
+<pre><code class="language-python">all_ranks = torch.arange(world_size).reshape(ExternalDP, DP, PP, PCP, TP)
+ep_ranks = all_ranks.transpose(1, 2).reshape(-1, DP * PCP * TP).unbind(0)
+</code></pre>
+<p>每个 EP rank 持有 <code>n_routed_experts / ep_size</code> 个专家。例如 8 个路由专家、4 个 EP rank，则每个 rank 持有 2 个专家。</p>
+<p><code>vllm/distributed/parallel_state.py</code></p>
+<h2>Expert Map Manager</h2>
+<p><code>FusedMoE</code> 层管理专家映射关系，核心数据结构：</p>
+<table>
+<thead>
+<tr>
+<th>数据结构</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>expert_map</code></td>
+<td>全局专家 ID → 本地 ID（-1 表示不在本 rank）</td>
+</tr>
+<tr>
+<td><code>routing_tables</code></td>
+<td>global_to_physical, physical_to_global, local_to_global 映射</td>
+</tr>
+<tr>
+<td><code>local_num_experts</code></td>
+<td>本 rank 持有的专家数量</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+for local_id, global_id in enumerate(local_expert_ids):
+    expert_map[global_id] = local_id
+</code></pre>
+<p>路由器输出的专家 ID 是全局 ID，通过 <code>expert_map</code> 转换为本地 ID。若映射为 -1，表示该专家不在本 rank，需要通过 all-to-all 发送到其他 rank。</p>
+<p><code>vllm/model_executor/layers/fused_moe/layer.py</code></p>
+<h2>Dispatch-Combine 流程</h2>
+<h3>1. Router 计算 top-k 专家</h3>
+<p>Router 对每个 token 计算 expert scores，选择 top-k 个专家及其权重。输出 <code>topk_ids</code>（专家全局 ID）和 <code>topk_weights</code>（路由权重）。
+<code>vllm/model_executor/layers/fused_moe/layer.py</code></p>
+<h3>2. Dispatch：All2All 发送 token</h3>
+<p>根据 <code>topk_ids</code>，将 token 发送到目标专家所在的 EP rank。all-to-all 通信后，每个 rank 收到需要由本地专家处理的 token。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h3>3. 本地专家计算</h3>
+<p>每个 EP rank 对接收到的 token 执行本地专家的 forward pass。专家计算通常是 GEMM（gate_proj, up_proj, down_proj）。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h3>4. Combine：All2All 收集结果</h3>
+<p>反向 all-to-all 通信，将专家输出结果发送回原始 token 所在的 EP rank。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h3>5. 加权求和</h3>
+<p>按 <code>topk_weights</code> 对各专家的输出做加权求和，得到最终 MoE 输出。
+<code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h2>All2All 后端</h2>
+<p>vLLM 支持多种 All2All 后端实现，针对不同硬件和场景优化：</p>
+<table>
+<thead>
+<tr>
+<th>后端</th>
+<th>特点</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DeepEP HT</td>
+<td>High-Throughput，高吞吐量</td>
+<td>大 batch、吞吐优先</td>
+</tr>
+<tr>
+<td>DeepEP LL</td>
+<td>Low-Latency，FP8 dispatch</td>
+<td>低延迟、FP8 量化</td>
+</tr>
+<tr>
+<td>MoRI</td>
+<td>I/O based，绕过 NVLink</td>
+<td>跨节点、网络传输</td>
+</tr>
+<tr>
+<td>FlashInfer NVLink 2-sided</td>
+<td>FlashInfer 实现，双向 NVLink</td>
+<td>单节点、NVLink</td>
+</tr>
+<tr>
+<td>FlashInfer NVLink 1-sided</td>
+<td>FlashInfer 实现，单向 NVLink</td>
+<td>单节点、优化延迟</td>
+</tr>
+<tr>
+<td>NIXL EP</td>
+<td>NVIDIA NIXL 库</td>
+<td>NVIDIA GPU</td>
+</tr>
+<tr>
+<td>Naive</td>
+<td>AllGather + ReduceScatter 回退</td>
+<td>无专用 all2all kernel</td>
+</tr>
+<tr>
+<td>None</td>
+<td>无 EP（所有专家在单 GPU）</td>
+<td>ep_size=1</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h2>Naive DP+EP 回退</h2>
+<p>当没有专用 all-to-all kernel 时，使用 Naive 后端回退到 AllGather + ReduceScatter：</p>
+<p><strong>Dispatch 阶段</strong>：</p>
+<ol>
+<li>AllGather：将所有 EP rank 的 token 汇聚到每个 rank</li>
+<li>每个 rank 根据本地专家 ID 筛选需要处理的 token</li>
+</ol>
+<p><strong>Combine 阶段</strong>：</p>
+<ol>
+<li>每个 rank 计算本地专家输出</li>
+<li>ReduceScatter：将输出按 token 维度切分回各 rank</li>
+</ol>
+<p>Naive 后端通信量更高（AllGather + ReduceScatter 各一次），但实现简单，无需专用 kernel。</p>
+<p><code>vllm/model_executor/layers/fused_moe/runner/moe_runner.py</code></p>
+<h2>EPLB 负载均衡</h2>
+<p>Expert Parallelism Load Balancing（EPLB）通过冗余专家实现负载均衡。启用后，部分专家会被复制到多个 rank，根据负载动态调整专家分布。</p>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_eplb</code></td>
+<td>启用 EPLB</td>
+</tr>
+<tr>
+<td><code>num_redundant_experts</code></td>
+<td>冗余专家数量</td>
+</tr>
+<tr>
+<td><code>ep_rebalance_interval</code></td>
+<td>重平衡间隔（步数）</td>
+</tr>
+</tbody>
+</table>
+<p>EPLB 统计各专家的负载（处理的 token 数），定期重新分配专家到不同 rank，使各 rank 负载更均衡。</p>
+<p><code>vllm/model_executor/layers/fused_moe/layer.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--expert-parallel-size</code></td>
+<td>1</td>
+<td>EP 组大小，决定专家分布到多少 GPU</td>
+</tr>
+<tr>
+<td><code>--enable-eplb</code></td>
+<td>False</td>
+<td>启用 EPLB 负载均衡</td>
+</tr>
+<tr>
+<td><code>--num-redundant-experts</code></td>
+<td>0</td>
+<td>冗余专家数量（用于 EPLB）</td>
+</tr>
+<tr>
+<td><code>--ep-revise-role</code></td>
+<td>-</td>
+<td>EP 角色修订（调试用）</td>
+</tr>
+<tr>
+<td><code>--moe-all2all-backend</code></td>
+<td>auto</td>
+<td>All2All 后端选择</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

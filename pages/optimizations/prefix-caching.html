@@ -12,27 +12,606 @@
 <body data-page-id="prefix-caching">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
-    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>optimization</span><span>/</span><span>Prefix Caching</span></nav>
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>optimizations</span><span>/</span><span>Prefix Caching</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>optimization</span><span>intermediate</span><span class="status">todo</span><span>12 min</span></div>
+      <div class="card-meta"><span>optimizations</span><span>intermediate</span><span class="status">draft</span><span>12 min</span></div>
       <h1>Prefix Caching</h1>
-      <p class="hero-text">前缀复用、hash 与 cache 命中流程</p>
+      <p class="hero-text">相同 prompt 前缀的 <span data-term="KV block" data-tip="固定大小的 GPU 显存块，存放 block_size 个 token 的 Key 和 Value 向量。">KV block</span> 只计算和保存一次，后续请求通过 <span data-term="链式哈希" data-tip="每个 block 的哈希依赖前一个 block 的哈希和本 block 的 token，形成向下封闭的哈希链。">链式哈希</span> 匹配直接复用。</p>
       <div class="tags"><span class="tag">Prefix Caching</span><span class="tag">Hash</span><span class="tag">KV Cache</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/prefix-caching-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象办公室里有一块<strong>共享白板</strong>。多个同事要写同样的标题（system prompt），第一个人写完后留在白板上，后面的人只需<strong>指一指</strong>已有的标题，不用重新写。标题一直保留，直到白板写满需要擦掉最旧的内容。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_manager.py">
+    <div class="diagram-title">Prefix Caching 心智模型</div>
+    <div class="kv-mental-model">
+      <div class="kv-data-structures">
+        <div class="kv-ds">
+          <div class="kv-ds-title">请求 A（先到）</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">System Prompt</div>
+            <div class="kv-ds-item">上下文</div>
+            <div class="kv-ds-item">用户问题 A</div>
+          </div>
+        </div>
+        <div class="kv-ds">
+          <div class="kv-ds-title">请求 B（后到）</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">System Prompt</div>
+            <div class="kv-ds-item">上下文</div>
+            <div class="kv-ds-item">用户问题 B</div>
+          </div>
+        </div>
+      </div>
+      <div class="kv-gpu-memory">
+        <div class="kv-gpu-title">KV Cache（物理 block）</div>
+        <div class="kv-blocks">
+          <div class="kv-block kv-block-cached" data-bid="0">B0</div>
+          <div class="kv-block kv-block-cached" data-bid="1">B1</div>
+          <div class="kv-block kv-block-used" data-bid="2">B2</div>
+          <div class="kv-block kv-block-used" data-bid="3">B3</div>
+        </div>
+      </div>
+      <div class="kv-legend">
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-cached"></span> 共享 block（哈希匹配，只存一份）</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-used"></span> 请求独占 block</div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="pc-mental-model"><p>Prefix Caching 心智模型展示了两个请求共享相同前缀时的 KV block 复用：</p>
+<p><strong>请求 A</strong>（先到）：包含 System Prompt + 上下文 + 用户问题 A，三个部分分别占用 block。首次计算时，所有 block 的 KV 都需要从头算。</p>
+<p><strong>请求 B</strong>（后到）：包含 System Prompt + 上下文 + 用户问题 B。前两个 block 与 A 的前缀完全相同，通过哈希匹配发现缓存命中，直接复用 B0 和 B1，只需计算用户问题 B 对应的新 block。</p>
+<p><strong>KV Cache</strong>：物理 block 中 B0 和 B1 被两个请求共享（ref_cnt > 1），B2 和 B3 分别被 A 和 B 独占。共享 block 不会被单独回收，直到所有引用者释放。</p>
+<p>关键收益：相同前缀只计算一次、显存占用大幅减少、首 token 延迟降低。</p>
+</template>
+<p>关键收益：<strong>相同前缀只计算一次</strong>、<strong>显存占用大幅减少</strong>、<strong>首 token 延迟降低</strong>。</p>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>链式哈希</h2>
+      
+<p>Prefix Caching 的核心是<strong>链式哈希</strong>——每个 block 的哈希不仅依赖自身的 token，还依赖前一个 block 的哈希，形成一条哈希链。</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+def hash_block_tokens(
+    parent_hash: Optional[int],
+    token_ids: Sequence[int],
+    extra_keys: Optional[Hashable] = None,
+) -> int:
+    return hash((parent_hash, *token_ids, extra_keys))
+</code></pre>
+<p>哈希链的构建过程：</p>
+<pre><code>hash₀ = H(seed, tokens[0:16])
+hash₁ = H(hash₀, tokens[16:32])
+hash₂ = H(hash₁, tokens[32:48])
+...
+</code></pre>
+<p><strong>向下封闭性</strong>：如果 hash₃ 匹配，则 hash₀-₂ 必然也匹配。因为 hash₃ 依赖 hash₂，hash₂ 依赖 hash₁，以此类推。这意味着一旦某个 block 命中缓存，它之前的所有 block 都必然命中——不需要逐个验证。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">链式哈希结构</div>
+    <div class="kv-hash-chain">
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₀</div>
+        <div class="kv-hash-block-detail">H(seed, tokens[0:16])</div>
+        <div class="kv-hash-block-detail">Block 0: tokens 0-15</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₁</div>
+        <div class="kv-hash-block-detail">H(hash₀, tokens[16:32])</div>
+        <div class="kv-hash-block-detail">Block 1: tokens 16-31</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₂</div>
+        <div class="kv-hash-block-detail">H(hash₁, tokens[32:48])</div>
+        <div class="kv-hash-block-detail">Block 2: tokens 32-47</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₃</div>
+        <div class="kv-hash-block-detail">H(hash₂, tokens[48:64])</div>
+        <div class="kv-hash-block-detail">Block 3: tokens 48-63</div>
+      </div>
+    </div>
+    <div class="arch-flow-label"><strong>向下封闭</strong>：hash₃ 匹配 ⟹ hash₀~hash₂ 必然匹配</div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="pc-chain-hash"><p>链式哈希结构展示了 block 哈希的依赖关系：</p>
+<p><strong>Block 0</strong>：hash₀ = H(seed, tokens[0:16])，依赖初始种子和自身 token。
+<strong>Block 1</strong>：hash₁ = H(hash₀, tokens[16:32])，依赖父哈希 hash₀ 和自身 token。
+<strong>Block 2</strong>：hash₂ = H(hash₁, tokens[32:48])，依赖父哈希 hash₁ 和自身 token。
+<strong>Block 3</strong>：hash₃ = H(hash₂, tokens[48:64])，依赖父哈希 hash₂ 和自身 token。</p>
+<p><strong>向下封闭性</strong>：如果 hash₃ 匹配，则 hash₂ 必然匹配（因为 hash₃ 依赖 hash₂），进而 hash₁、hash₀ 也必然匹配。这意味着缓存查找只需要从最新 block 向前匹配，一旦命中就保证前缀完全一致。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>什么会影响哈希</h2>
+      
+<p>除了 token_ids 和 parent_hash，<code>extra_keys</code> 也会参与哈希计算。不同场景下 extra_keys 包含的内容不同：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>extra_keys 内容</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>多模态（Multi-modal）</strong></td>
+<td><code>(mm_hash, offset_within_block)</code></td>
+<td>多模态特征的哈希及其在 block 内的偏移</td>
+</tr>
+<tr>
+<td><strong>LoRA</strong></td>
+<td><code>lora_name</code></td>
+<td>不同 LoRA 适配器的 KV 不可混用</td>
+</tr>
+<tr>
+<td><strong>Cache Salt</strong></td>
+<td><code>request.cache_salt</code>（仅 block 0）</td>
+<td>用户指定的盐值，强制隔离不同请求的缓存</td>
+</tr>
+<tr>
+<td><strong>Prompt Embeds</strong></td>
+<td>SHA-256 hash of embedding tensor slice</td>
+<td>自定义 embedding 的哈希</td>
+</tr>
+</tbody>
+</table>
+<p>这些 extra_keys 确保了不同上下文下的 block 即使 token_ids 相同也不会错误复用。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>缓存查找流程</h2>
+      
+<p>当一个新请求到达时，调度器需要确定哪些 block 已经在缓存中，可以直接复用：</p>
+<div class="step-player" id="cache-lookup-flow"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 4</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="cache-lookup-flow-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>前置检查</h3>如果 prefix caching 被禁用，直接跳过查找，所有 block 都需要重新计算。
+<code class="step-ref">vllm/v1/core/kv_cache_manager.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>计算最大命中长度</h3><code>max_cache_hit_length = num_tokens - 1</code>。最后一个 token 必须重新计算以获取 logits，因此最多只能命中 <code>num_tokens - 1</code> 个 token 对应的 block。
+<code class="step-ref">vllm/v1/core/kv_cache_manager.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>查找最长缓存命中</h3>调用 <code>coordinator.find_longest_cache_hit(block_hashes, max_cache_hit_length)</code>，从 hash₀ 开始逐个匹配，找到最长的连续命中前缀。
+<code class="step-ref">vllm/v1/core/kv_cache_utils.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>返回结果</h3>返回 <code>(computed_blocks, num_new_computed_tokens)</code>。computed_blocks 是已命中的 block 列表，num_new_computed_tokens 是需要新计算的 token 数。
+<code class="step-ref">vllm/v1/core/kv_cache_manager.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>哈希种子与可复现性</h2>
+      
+<p>链式哈希的起点（seed）决定了整个哈希链。vLLM 通过 <code>init_none_hash()</code> 初始化种子：</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+def init_none_hash() -> int:
+    seed = os.environ.get("PYTHONHASHSEED")
+    if seed is not None:
+        return hash(int(seed))
+    return hash(os.urandom(32))
+</code></pre>
+<ul>
+<li>如果设置了 <code>PYTHONHASHSEED</code> 环境变量，使用它作为种子——这保证了<strong>跨进程可复现性</strong>（TP 场景下各 rank 的哈希一致）</li>
+<li>否则使用 <code>os.urandom(32)</code> 生成随机种子——每个进程独立，缓存不跨进程共享</li>
+</ul>
+<p>种子存储在全局变量 <code>NONE_HASH</code> 中，作为所有哈希链的起始 parent_hash。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>全命中场景</h2>
+      
+<p>当请求的所有 token 都命中缓存时（<code>num_computed_tokens == num_tokens</code>），vLLM 会强制重算最后一个 token：</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_manager.py
+if num_computed_tokens == num_tokens:
+    num_computed_tokens = num_tokens - 1
+</code></pre>
+<p>这确保了最后一个 token 总是被<strong>重新计算</strong>，从而得到正确的 logits 用于采样。如果直接复用最后一个 token 的 KV，attention 输出可能不包含当前请求的完整上下文。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Block 生命周期与缓存标记</h2>
+      
+<p>一个 block 在 prefix caching 中会经历以下状态转换：</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_manager.py">
+    <div class="diagram-title">Block 生命周期</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">
+        Free
+        <small>无哈希，无引用</small>
+      </div>
+      <div class="kv-lc-arrow">计算 KV → 设置 hash</div>
+      <div class="kv-lc-state" data-state="used">
+        In Use
+        <small>hash 已设置，ref_cnt > 0</small>
+      </div>
+      <div class="kv-lc-arrow">请求释放 → ref_cnt = 0</div>
+      <div class="kv-lc-state" data-state="cached-free">
+        Cached+Free
+        <small>hash 保留，ref_cnt = 0，可被复用</small>
+      </div>
+      <div class="kv-lc-arrow">缓存淘汰 → 重新分配</div>
+      <div class="kv-lc-state" data-state="free">
+        Free
+        <small>hash 被清除</small>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="pc-block-lifecycle"><p>Block 生命周期展示了 prefix caching 中 block 的状态转换：</p>
+<p><strong>Free</strong>（无哈希，无引用）：block 处于空闲状态，没有存储任何 KV 数据。</p>
+<p><strong>In Use</strong>（hash 已设置，ref_cnt > 0）：block 正在被某个请求使用。KV 计算完成后设置哈希值，用于后续缓存查找。</p>
+<p><strong>Cached+Free</strong>（hash 保留，ref_cnt = 0，可被复用）：请求释放了 block，但哈希值被保留。这意味着后续请求如果哈希匹配，可以直接复用这个 block 的 KV 数据，无需重新计算。这是 prefix caching 的核心——hash 在释放时不清除。</p>
+<p><strong>Free</strong>（hash 被清除）：当缓存空间不足时，Cached+Free 的 block 会被淘汰。此时哈希被清除，block 回到空闲状态。新分配的 block 会覆盖旧的 KV 数据。</p>
+<p>关键点：hash 在请求释放时<strong>不会</strong>被清除，只有在 block 被淘汰并重新分配时才清除。</p>
+</template>
+<p>关键点：<strong>hash 在请求释放时不会被清除</strong>，只有在 block 被淘汰并重新分配时才清除。这使得短时间内到达的相同前缀请求可以复用缓存。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>混合模型的哈希粒度</h2>
+      
+<p>对于包含多种 attention 类型的混合模型（如同时有 full attention 和 sliding window attention 的层），哈希和缓存查找需要特殊处理：</p>
+<ul>
+<li><strong>hash_block_size</strong> = GCD（各 group block_size 的最大公约数），确保所有 attention group 的 block 边界对齐</li>
+<li><strong>max_cache_hit_length</strong> 必须是 LCM（各 group block_size 的最小公倍数）的倍数</li>
+<li>查找时采用<strong>迭代搜索</strong>：从最长的可能命中开始，逐步缩短，直到找到所有 group 都能接受的命中长度</li>
+</ul>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+# 混合模型：hash_block_size = GCD，max_cache_hit_length = LCM 的倍数
+hash_block_size = math.gcd(*group_block_sizes)
+lcm_block_size = math.lcm(*group_block_sizes)
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+<th>源码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_prefix_caching</code></td>
+<td>True</td>
+<td>是否启用 prefix caching</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>prefix_caching_hash_algo</code></td>
+<td>"sha256"</td>
+<td>哈希算法（"sha256" 或 "builtin"）</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>hash_block_size</code></td>
+<td>None（= block_size）</td>
+<td>哈希粒度，混合模型自动取 GCD</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>cache_salt</code></td>
+<td>None</td>
+<td>用户指定的缓存盐值，强制隔离缓存</td>
+<td>kv_cache_manager.py</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象办公室里有一块<strong>共享白板</strong>。多个同事要写同样的标题（system prompt），第一个人写完后留在白板上，后面的人只需<strong>指一指</strong>已有的标题，不用重新写。标题一直保留，直到白板写满需要擦掉最旧的内容。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_manager.py">
+    <div class="diagram-title">Prefix Caching 心智模型</div>
+    <div class="kv-mental-model">
+      <div class="kv-data-structures">
+        <div class="kv-ds">
+          <div class="kv-ds-title">请求 A（先到）</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">System Prompt</div>
+            <div class="kv-ds-item">上下文</div>
+            <div class="kv-ds-item">用户问题 A</div>
+          </div>
+        </div>
+        <div class="kv-ds">
+          <div class="kv-ds-title">请求 B（后到）</div>
+          <div class="kv-ds-items">
+            <div class="kv-ds-item">System Prompt</div>
+            <div class="kv-ds-item">上下文</div>
+            <div class="kv-ds-item">用户问题 B</div>
+          </div>
+        </div>
+      </div>
+      <div class="kv-gpu-memory">
+        <div class="kv-gpu-title">KV Cache（物理 block）</div>
+        <div class="kv-blocks">
+          <div class="kv-block kv-block-cached" data-bid="0">B0</div>
+          <div class="kv-block kv-block-cached" data-bid="1">B1</div>
+          <div class="kv-block kv-block-used" data-bid="2">B2</div>
+          <div class="kv-block kv-block-used" data-bid="3">B3</div>
+        </div>
+      </div>
+      <div class="kv-legend">
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-cached"></span> 共享 block（哈希匹配，只存一份）</div>
+        <div class="kv-legend-item"><span class="kv-legend-dot kv-block-used"></span> 请求独占 block</div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Prefix Caching 心智模型展示了两个请求共享相同前缀时的 KV block 复用：</p>
+<p><strong>请求 A</strong>（先到）：包含 System Prompt + 上下文 + 用户问题 A，三个部分分别占用 block。首次计算时，所有 block 的 KV 都需要从头算。</p>
+<p><strong>请求 B</strong>（后到）：包含 System Prompt + 上下文 + 用户问题 B。前两个 block 与 A 的前缀完全相同，通过哈希匹配发现缓存命中，直接复用 B0 和 B1，只需计算用户问题 B 对应的新 block。</p>
+<p><strong>KV Cache</strong>：物理 block 中 B0 和 B1 被两个请求共享（ref_cnt > 1），B2 和 B3 分别被 A 和 B 独占。共享 block 不会被单独回收，直到所有引用者释放。</p>
+<p>关键收益：相同前缀只计算一次、显存占用大幅减少、首 token 延迟降低。</p>
+<p>关键收益：<strong>相同前缀只计算一次</strong>、<strong>显存占用大幅减少</strong>、<strong>首 token 延迟降低</strong>。</p>
+<h2>链式哈希</h2>
+<p>Prefix Caching 的核心是<strong>链式哈希</strong>——每个 block 的哈希不仅依赖自身的 token，还依赖前一个 block 的哈希，形成一条哈希链。</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+def hash_block_tokens(
+    parent_hash: Optional[int],
+    token_ids: Sequence[int],
+    extra_keys: Optional[Hashable] = None,
+) -> int:
+    return hash((parent_hash, *token_ids, extra_keys))
+</code></pre>
+<p>哈希链的构建过程：</p>
+<pre><code>hash₀ = H(seed, tokens[0:16])
+hash₁ = H(hash₀, tokens[16:32])
+hash₂ = H(hash₁, tokens[32:48])
+...
+</code></pre>
+<p><strong>向下封闭性</strong>：如果 hash₃ 匹配，则 hash₀-₂ 必然也匹配。因为 hash₃ 依赖 hash₂，hash₂ 依赖 hash₁，以此类推。这意味着一旦某个 block 命中缓存，它之前的所有 block 都必然命中——不需要逐个验证。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_utils.py">
+    <div class="diagram-title">链式哈希结构</div>
+    <div class="kv-hash-chain">
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₀</div>
+        <div class="kv-hash-block-detail">H(seed, tokens[0:16])</div>
+        <div class="kv-hash-block-detail">Block 0: tokens 0-15</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₁</div>
+        <div class="kv-hash-block-detail">H(hash₀, tokens[16:32])</div>
+        <div class="kv-hash-block-detail">Block 1: tokens 16-31</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₂</div>
+        <div class="kv-hash-block-detail">H(hash₁, tokens[32:48])</div>
+        <div class="kv-hash-block-detail">Block 2: tokens 32-47</div>
+      </div>
+      <div class="kv-hash-arrow">→</div>
+      <div class="kv-hash-block">
+        <div class="kv-hash-block-title">hash₃</div>
+        <div class="kv-hash-block-detail">H(hash₂, tokens[48:64])</div>
+        <div class="kv-hash-block-detail">Block 3: tokens 48-63</div>
+      </div>
+    </div>
+    <div class="arch-flow-label"><strong>向下封闭</strong>：hash₃ 匹配 ⟹ hash₀~hash₂ 必然匹配</div>
+  </div>
+</div>
+</code></pre>
+<p>链式哈希结构展示了 block 哈希的依赖关系：</p>
+<p><strong>Block 0</strong>：hash₀ = H(seed, tokens[0:16])，依赖初始种子和自身 token。
+<strong>Block 1</strong>：hash₁ = H(hash₀, tokens[16:32])，依赖父哈希 hash₀ 和自身 token。
+<strong>Block 2</strong>：hash₂ = H(hash₁, tokens[32:48])，依赖父哈希 hash₁ 和自身 token。
+<strong>Block 3</strong>：hash₃ = H(hash₂, tokens[48:64])，依赖父哈希 hash₂ 和自身 token。</p>
+<p><strong>向下封闭性</strong>：如果 hash₃ 匹配，则 hash₂ 必然匹配（因为 hash₃ 依赖 hash₂），进而 hash₁、hash₀ 也必然匹配。这意味着缓存查找只需要从最新 block 向前匹配，一旦命中就保证前缀完全一致。</p>
+<h2>什么会影响哈希</h2>
+<p>除了 token_ids 和 parent_hash，<code>extra_keys</code> 也会参与哈希计算。不同场景下 extra_keys 包含的内容不同：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>extra_keys 内容</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>多模态（Multi-modal）</strong></td>
+<td><code>(mm_hash, offset_within_block)</code></td>
+<td>多模态特征的哈希及其在 block 内的偏移</td>
+</tr>
+<tr>
+<td><strong>LoRA</strong></td>
+<td><code>lora_name</code></td>
+<td>不同 LoRA 适配器的 KV 不可混用</td>
+</tr>
+<tr>
+<td><strong>Cache Salt</strong></td>
+<td><code>request.cache_salt</code>（仅 block 0）</td>
+<td>用户指定的盐值，强制隔离不同请求的缓存</td>
+</tr>
+<tr>
+<td><strong>Prompt Embeds</strong></td>
+<td>SHA-256 hash of embedding tensor slice</td>
+<td>自定义 embedding 的哈希</td>
+</tr>
+</tbody>
+</table>
+<p>这些 extra_keys 确保了不同上下文下的 block 即使 token_ids 相同也不会错误复用。</p>
+<h2>缓存查找流程</h2>
+<p>当一个新请求到达时，调度器需要确定哪些 block 已经在缓存中，可以直接复用：</p>
+<h3>1. 前置检查</h3>
+<p>如果 prefix caching 被禁用，直接跳过查找，所有 block 都需要重新计算。
+<code>vllm/v1/core/kv_cache_manager.py</code></p>
+<h3>2. 计算最大命中长度</h3>
+<p><code>max_cache_hit_length = num_tokens - 1</code>。最后一个 token 必须重新计算以获取 logits，因此最多只能命中 <code>num_tokens - 1</code> 个 token 对应的 block。
+<code>vllm/v1/core/kv_cache_manager.py</code></p>
+<h3>3. 查找最长缓存命中</h3>
+<p>调用 <code>coordinator.find_longest_cache_hit(block_hashes, max_cache_hit_length)</code>，从 hash₀ 开始逐个匹配，找到最长的连续命中前缀。
+<code>vllm/v1/core/kv_cache_utils.py</code></p>
+<h3>4. 返回结果</h3>
+<p>返回 <code>(computed_blocks, num_new_computed_tokens)</code>。computed_blocks 是已命中的 block 列表，num_new_computed_tokens 是需要新计算的 token 数。
+<code>vllm/v1/core/kv_cache_manager.py</code></p>
+<h2>哈希种子与可复现性</h2>
+<p>链式哈希的起点（seed）决定了整个哈希链。vLLM 通过 <code>init_none_hash()</code> 初始化种子：</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+def init_none_hash() -> int:
+    seed = os.environ.get("PYTHONHASHSEED")
+    if seed is not None:
+        return hash(int(seed))
+    return hash(os.urandom(32))
+</code></pre>
+<ul>
+<li>如果设置了 <code>PYTHONHASHSEED</code> 环境变量，使用它作为种子——这保证了<strong>跨进程可复现性</strong>（TP 场景下各 rank 的哈希一致）</li>
+<li>否则使用 <code>os.urandom(32)</code> 生成随机种子——每个进程独立，缓存不跨进程共享</li>
+</ul>
+<p>种子存储在全局变量 <code>NONE_HASH</code> 中，作为所有哈希链的起始 parent_hash。</p>
+<h2>全命中场景</h2>
+<p>当请求的所有 token 都命中缓存时（<code>num_computed_tokens == num_tokens</code>），vLLM 会强制重算最后一个 token：</p>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_manager.py
+if num_computed_tokens == num_tokens:
+    num_computed_tokens = num_tokens - 1
+</code></pre>
+<p>这确保了最后一个 token 总是被<strong>重新计算</strong>，从而得到正确的 logits 用于采样。如果直接复用最后一个 token 的 KV，attention 输出可能不包含当前请求的完整上下文。</p>
+<h2>Block 生命周期与缓存标记</h2>
+<p>一个 block 在 prefix caching 中会经历以下状态转换：</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/kv_cache_manager.py">
+    <div class="diagram-title">Block 生命周期</div>
+    <div class="kv-lifecycle">
+      <div class="kv-lc-state" data-state="free">
+        Free
+        <small>无哈希，无引用</small>
+      </div>
+      <div class="kv-lc-arrow">计算 KV → 设置 hash</div>
+      <div class="kv-lc-state" data-state="used">
+        In Use
+        <small>hash 已设置，ref_cnt > 0</small>
+      </div>
+      <div class="kv-lc-arrow">请求释放 → ref_cnt = 0</div>
+      <div class="kv-lc-state" data-state="cached-free">
+        Cached+Free
+        <small>hash 保留，ref_cnt = 0，可被复用</small>
+      </div>
+      <div class="kv-lc-arrow">缓存淘汰 → 重新分配</div>
+      <div class="kv-lc-state" data-state="free">
+        Free
+        <small>hash 被清除</small>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Block 生命周期展示了 prefix caching 中 block 的状态转换：</p>
+<p><strong>Free</strong>（无哈希，无引用）：block 处于空闲状态，没有存储任何 KV 数据。</p>
+<p><strong>In Use</strong>（hash 已设置，ref_cnt > 0）：block 正在被某个请求使用。KV 计算完成后设置哈希值，用于后续缓存查找。</p>
+<p><strong>Cached+Free</strong>（hash 保留，ref_cnt = 0，可被复用）：请求释放了 block，但哈希值被保留。这意味着后续请求如果哈希匹配，可以直接复用这个 block 的 KV 数据，无需重新计算。这是 prefix caching 的核心——hash 在释放时不清除。</p>
+<p><strong>Free</strong>（hash 被清除）：当缓存空间不足时，Cached+Free 的 block 会被淘汰。此时哈希被清除，block 回到空闲状态。新分配的 block 会覆盖旧的 KV 数据。</p>
+<p>关键点：hash 在请求释放时<strong>不会</strong>被清除，只有在 block 被淘汰并重新分配时才清除。</p>
+<p>关键点：<strong>hash 在请求释放时不会被清除</strong>，只有在 block 被淘汰并重新分配时才清除。这使得短时间内到达的相同前缀请求可以复用缓存。</p>
+<h2>混合模型的哈希粒度</h2>
+<p>对于包含多种 attention 类型的混合模型（如同时有 full attention 和 sliding window attention 的层），哈希和缓存查找需要特殊处理：</p>
+<ul>
+<li><strong>hash_block_size</strong> = GCD（各 group block_size 的最大公约数），确保所有 attention group 的 block 边界对齐</li>
+<li><strong>max_cache_hit_length</strong> 必须是 LCM（各 group block_size 的最小公倍数）的倍数</li>
+<li>查找时采用<strong>迭代搜索</strong>：从最长的可能命中开始，逐步缩短，直到找到所有 group 都能接受的命中长度</li>
+</ul>
+<pre><code class="language-python"># vllm/v1/core/kv_cache_utils.py
+# 混合模型：hash_block_size = GCD，max_cache_hit_length = LCM 的倍数
+hash_block_size = math.gcd(*group_block_sizes)
+lcm_block_size = math.lcm(*group_block_sizes)
+</code></pre>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+<th>源码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_prefix_caching</code></td>
+<td>True</td>
+<td>是否启用 prefix caching</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>prefix_caching_hash_algo</code></td>
+<td>"sha256"</td>
+<td>哈希算法（"sha256" 或 "builtin"）</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>hash_block_size</code></td>
+<td>None（= block_size）</td>
+<td>哈希粒度，混合模型自动取 GCD</td>
+<td>kv_cache_utils.py</td>
+</tr>
+<tr>
+<td><code>cache_salt</code></td>
+<td>None</td>
+<td>用户指定的缓存盐值，强制隔离缓存</td>
+<td>kv_cache_manager.py</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

@@ -180,8 +180,8 @@ window.SITE_DATA = {
       "id": "process-communication",
       "title": "进程与通信",
       "subtitle": "ZMQ 帧协议、共享内存、线程 Queue、NCCL 集合通信、TP/SP/CP 卡间通信模式",
-      "href": "pages/core/process-communication.html",
-      "category": "core",
+      "href": "pages/distributed/process-communication.html",
+      "category": "distributed",
       "level": "intermediate",
       "status": "ready",
       "readingMinutes": 22,
@@ -256,7 +256,7 @@ window.SITE_DATA = {
       "title": "PagedAttention",
       "subtitle": "分页式 KV 访问：Block Table、Slot Mapping、Attention Metadata 与 Backend 选择",
       "href": "pages/optimizations/paged-attention.html",
-      "category": "optimization",
+      "category": "optimizations",
       "level": "intermediate",
       "status": "ready",
       "readingMinutes": 20,
@@ -277,16 +277,18 @@ window.SITE_DATA = {
       "href": "pages/distributed/parallelism.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "outline",
+      "status": "draft",
       "readingMinutes": 18,
       "tags": [
         "TP",
         "PP",
         "DP",
-        "EP"
+        "EP",
+        "CP"
       ],
       "codeRefs": [
-        "vllm/distributed/parallel_state.py"
+        "vllm/distributed/parallel_state.py",
+        "vllm/model_executor/layers/linear.py"
       ]
     },
     {
@@ -296,7 +298,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/tensor-parallel.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Tensor Parallel",
@@ -313,7 +315,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/data-parallel.html",
       "category": "distributed",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Data Parallel",
@@ -321,7 +323,7 @@ window.SITE_DATA = {
         "Load Balance"
       ],
       "codeRefs": [
-        "vllm/v1/worker/gpu_worker.py",
+        "vllm/v1/engine/coordinator.py",
         "vllm/distributed/utils.py"
       ]
     },
@@ -332,7 +334,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/context-parallel.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 14,
       "tags": [
         "Context Parallel",
@@ -352,7 +354,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/sequence-parallel.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Sequence Parallel",
@@ -371,7 +373,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/pipeline-parallel.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Pipeline Parallel",
@@ -388,7 +390,7 @@ window.SITE_DATA = {
       "href": "pages/distributed/expert-parallel.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Expert Parallel",
@@ -396,35 +398,18 @@ window.SITE_DATA = {
         "All To All"
       ],
       "codeRefs": [
-        "vllm/model_executor/models/deepseek_v2.py"
-      ]
-    },
-    {
-      "id": "qwen3-moe",
-      "title": "Qwen3 MoE",
-      "subtitle": "Qwen3 MoE 模型展开式交互流程图",
-      "href": "pages/models/qwen3-moe.html",
-      "category": "model",
-      "level": "intermediate",
-      "status": "ready",
-      "readingMinutes": 15,
-      "tags": [
-        "Qwen3",
-        "MoE",
-        "Expert Parallel"
-      ],
-      "codeRefs": [
-        "vllm/model_executor/models/qwen3_moe.py"
+        "vllm/model_executor/models/deepseek_v2.py",
+        "vllm/model_executor/layers/fused_moe/layer.py"
       ]
     },
     {
       "id": "deepseek-mla",
       "title": "DeepSeek MLA",
-      "subtitle": "MLA、MoE 与 DeepSeek 系列模型结构",
+      "subtitle": "MLA 将 KV 压缩到低维隐向量，MoE grouped top-k 路由",
       "href": "pages/models/deepseek-mla.html",
-      "category": "model",
+      "category": "models",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 14,
       "tags": [
         "DeepSeek",
@@ -432,17 +417,18 @@ window.SITE_DATA = {
         "MoE"
       ],
       "codeRefs": [
-        "vllm/model_executor/models/deepseek_v2.py"
+        "vllm/model_executor/models/deepseek_v2.py",
+        "vllm/model_executor/layers/mla.py"
       ]
     },
     {
       "id": "speculative-decoding",
       "title": "投机解码总览",
-      "subtitle": "draft、verify、accept/reject 的统一入口",
+      "subtitle": "proposer 生成、target 验证、rejection sampling 接受/拒绝",
       "href": "pages/decoding/speculative-decoding.html",
       "category": "decoding",
       "level": "advanced",
-      "status": "outline",
+      "status": "draft",
       "readingMinutes": 16,
       "tags": [
         "Speculative Decoding",
@@ -450,51 +436,54 @@ window.SITE_DATA = {
         "Verify"
       ],
       "codeRefs": [
-        "vllm/v1/spec_decode/draft_model.py"
+        "vllm/v1/spec_decode/llm_base_proposer.py",
+        "vllm/v1/worker/gpu/spec_decode/rejection_sampler.py"
       ]
     },
     {
       "id": "eagle",
       "title": "EAGLE",
-      "subtitle": "EAGLE 系列投机解码专题占位",
+      "subtitle": "利用 target model hidden states 自回归生成候选 token",
       "href": "pages/decoding/eagle.html",
       "category": "decoding",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "EAGLE",
         "Speculative Decoding"
       ],
       "codeRefs": [
-        "vllm/v1/spec_decode/eagle.py"
+        "vllm/v1/spec_decode/eagle.py",
+        "vllm/v1/spec_decode/llm_base_proposer.py"
       ]
     },
     {
       "id": "ngram",
       "title": "N-gram 投机解码",
-      "subtitle": "N-gram proposer 专题占位",
+      "subtitle": "无需神经模型，通过 n-gram 模式匹配预测后续 token",
       "href": "pages/decoding/ngram.html",
       "category": "decoding",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "Ngram",
         "Speculative Decoding"
       ],
       "codeRefs": [
-        "vllm/v1/spec_decode/ngram_proposer.py"
+        "vllm/v1/spec_decode/ngram_proposer.py",
+        "vllm/v1/spec_decode/ngram_proposer_gpu.py"
       ]
     },
     {
       "id": "medusa",
       "title": "Medusa",
-      "subtitle": "多头像并行预测投机解码",
+      "subtitle": "多预测头并行生成候选 token，单次 forward 完成",
       "href": "pages/decoding/medusa.html",
       "category": "decoding",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "Medusa",
@@ -508,11 +497,11 @@ window.SITE_DATA = {
     {
       "id": "dflash",
       "title": "DFlash",
-      "subtitle": "In-fill 风格解码的投机方案",
+      "subtitle": "非因果注意力并行起草，单次 forward 生成所有候选",
       "href": "pages/decoding/dflash.html",
       "category": "decoding",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "DFlash",
@@ -526,11 +515,11 @@ window.SITE_DATA = {
     {
       "id": "step3p5",
       "title": "Step 3.5",
-      "subtitle": "基于 MTP 的多 token 预测投机解码",
+      "subtitle": "基于 MTP 的多 token 预测，共享 target 的 embedding 和 LM head",
       "href": "pages/decoding/step3p5.html",
       "category": "decoding",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "Step3.5",
@@ -538,17 +527,18 @@ window.SITE_DATA = {
         "Speculative Decoding"
       ],
       "codeRefs": [
-        "vllm/v1/spec_decode/step3p5.py"
+        "vllm/v1/spec_decode/llm_base_proposer.py",
+        "vllm/model_executor/models/step3p5_mtp.py"
       ]
     },
     {
       "id": "suffix-decoding",
       "title": "Suffix Decoding",
-      "subtitle": "基于后缀匹配的投机解码",
+      "subtitle": "基于后缀树的模式匹配投机解码",
       "href": "pages/decoding/suffix-decoding.html",
       "category": "decoding",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "Suffix Decoding",
@@ -561,28 +551,29 @@ window.SITE_DATA = {
     {
       "id": "gemma4-spec",
       "title": "Gemma4 投机解码",
-      "subtitle": "Gemma4 模型内置投机解码方案",
+      "subtitle": "Gemma4 内置 MTP，跨模型 KV 共享",
       "href": "pages/decoding/gemma4-spec.html",
       "category": "decoding",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 10,
       "tags": [
         "Gemma4",
         "Speculative Decoding"
       ],
       "codeRefs": [
-        "vllm/v1/spec_decode/gemma4.py"
+        "vllm/v1/spec_decode/gemma4.py",
+        "vllm/model_executor/models/gemma4_mtp.py"
       ]
     },
     {
       "id": "prefix-caching",
       "title": "Prefix Caching",
-      "subtitle": "前缀复用、hash 与 cache 命中流程",
+      "subtitle": "链式哈希与前缀复用，相同 prompt 前缀的 block 只存一份",
       "href": "pages/optimizations/prefix-caching.html",
-      "category": "optimization",
+      "category": "optimizations",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Prefix Caching",
@@ -590,34 +581,36 @@ window.SITE_DATA = {
         "KV Cache"
       ],
       "codeRefs": [
-        "vllm/v1/core/kv_cache_utils.py"
+        "vllm/v1/core/kv_cache_utils.py",
+        "vllm/v1/core/kv_cache_manager.py"
       ]
     },
     {
       "id": "chunked-prefill",
       "title": "Chunked Prefill",
-      "subtitle": "长 prompt 拆分调度专题占位",
+      "subtitle": "长 prompt 分块调度，避免阻塞 decode 请求",
       "href": "pages/optimizations/chunked-prefill.html",
-      "category": "optimization",
+      "category": "optimizations",
       "level": "intermediate",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 12,
       "tags": [
         "Chunked Prefill",
         "Scheduler"
       ],
       "codeRefs": [
-        "vllm/v1/core/sched/scheduler.py"
+        "vllm/v1/core/sched/scheduler.py",
+        "vllm/config/scheduler.py"
       ]
     },
     {
       "id": "quantization",
       "title": "量化",
-      "subtitle": "FP8、INT8、INT4、AWQ、GPTQ 等量化专题入口",
+      "subtitle": "FP8/INT8/INT4/AWQ/GPTQ 等量化方法与 KV cache 量化",
       "href": "pages/optimizations/quantization.html",
-      "category": "optimization",
+      "category": "optimizations",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 14,
       "tags": [
         "Quantization",
@@ -625,24 +618,25 @@ window.SITE_DATA = {
         "INT4"
       ],
       "codeRefs": [
-        "vllm/model_executor/layers/quantization/fp8.py"
+        "vllm/model_executor/layers/quantization/fp8.py",
+        "vllm/model_executor/layers/quantization/__init__.py"
       ]
     },
     {
       "id": "disaggregated-prefill",
       "title": "Disaggregated Prefill",
-      "subtitle": "P/D 分离与远程 KV 传输专题占位",
+      "subtitle": "Prefill 与 Decode 分离部署，KV Connector 异步传输",
       "href": "pages/distributed/disaggregated-prefill.html",
       "category": "distributed",
       "level": "advanced",
-      "status": "todo",
+      "status": "draft",
       "readingMinutes": 14,
       "tags": [
         "Disaggregated Prefill",
         "KV Transfer"
       ],
       "codeRefs": [
-        "vllm/distributed/kv_transfer/kv_connector/v1"
+        "vllm/distributed/kv_transfer/kv_connector/v1/base.py"
       ]
     },
     {
@@ -652,7 +646,7 @@ window.SITE_DATA = {
       "href": "pages/reference/glossary.html",
       "category": "reference",
       "level": "beginner",
-      "status": "outline",
+      "status": "draft",
       "readingMinutes": 8,
       "tags": [
         "Glossary",

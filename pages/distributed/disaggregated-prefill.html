@@ -12,27 +12,594 @@
 <body data-page-id="disaggregated-prefill">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>distributed</span><span>/</span><span>Disaggregated Prefill</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">todo</span><span>14 min</span></div>
+      <div class="card-meta"><span>distributed</span><span>advanced</span><span class="status">draft</span><span>14 min</span></div>
       <h1>Disaggregated Prefill</h1>
-      <p class="hero-text">P/D 分离与远程 KV 传输专题占位</p>
+      <p class="hero-text">Prefill 节点与 Decode 节点分离部署，KV Cache 通过 <span data-term="KV Connector" data-tip="Prefill 和 Decode 节点间传输 KV Cache 的异步接口。">KV Connector</span> 异步传输，消除长 prefill 对 decode 吞吐的干扰。</p>
       <div class="tags"><span class="tag">Disaggregated Prefill</span><span class="tag">KV Transfer</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/disaggregated-prefill-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象一家餐厅厨房：prefill 好比食材准备（切菜、腌制——计算密集型），decode 好比烹饪和摆盘（内存带宽密集型）。Disaggregated Prefill 把这两种工作分离到不同的厨房（GPU），把准备好的食材（KV cache）从备菜间传到烹饪间。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram">
+    <div class="comm-panorama">
+      <div class="comm-proc">
+        <div class="comm-proc-title">Prefill 节点</div>
+        <div class="comm-proc-body">
+          <div class="comm-node-sub">计算密集型</div>
+          <div class="comm-node">处理长 prompt</div>
+          <div class="comm-node">生成 KV Cache</div>
+          <div class="comm-node">异步传输 KV</div>
+        </div>
+      </div>
+      <div class="comm-channel-group">
+        <div class="comm-channel-item">
+          <div class="comm-arrow">KV Cache ▶</div>
+          <div class="comm-label">KV Connector (NIXL / Mooncake / ...)</div>
+        </div>
+      </div>
+      <div class="comm-proc">
+        <div class="comm-proc-title">Decode 节点</div>
+        <div class="comm-proc-body">
+          <div class="comm-node-sub">内存带宽密集型</div>
+          <div class="comm-node">加载 KV Cache</div>
+          <div class="comm-node">逐 token 生成</div>
+          <div class="comm-node">低延迟响应</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="pd-mental-model-html"><p>Disaggregated Prefill 将推理分为两种节点：</p>
+<p><strong>Prefill 节点</strong>：计算密集型，负责处理长 prompt 和生成 KV Cache。完成后通过 KV Connector 异步传输 KV Cache 到 Decode 节点。Prefill 节点可以使用大 GPU 集群并行处理多个长 prompt。</p>
+<p><strong>Decode 节点</strong>：内存带宽密集型，负责加载 KV Cache 后逐 token 生成输出。Decode 节点不受长 prefill 阻塞，可以持续保持低延迟响应。</p>
+<p>两种节点之间通过 KV Connector（支持 NIXL、Mooncake 等传输协议）异步传输 KV Cache。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>为什么需要 P/D 分离</h2>
+      
+<p>Prefill 是计算密集型（compute-bound），decode 是内存带宽密集型（memory-bandwidth-bound）。混合部署时：</p>
+<ol>
+<li><strong>长 prefill 阻塞 decode</strong>：一个长 prefill 请求占满计算资源，decode 请求排队等待，TTFT 和 TBT（Time Between Tokens）均增大</li>
+<li><strong>资源配置矛盾</strong>：prefill 需要高算力（更多 SM），decode 需要高带宽（更大显存带宽），同一 GPU 无法同时最优化</li>
+<li><strong>批处理干扰</strong>：prefill 和 decode 混合调度时，batch 组成变化导致 GPU 利用率波动</li>
+</ol>
+<p>分离后，prefill 节点专注高吞吐的 prompt 处理，decode 节点专注低延迟的 token 生成，各自独立扩缩容。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>KVConnector 双侧接口</h2>
+      
+<p><code>KVConnectorBase_V1</code> 定义了 Scheduler 侧和 Worker 侧的异步接口，两侧分别运行在不同的 EngineCore 进程中：</p>
+<h3>Scheduler 侧</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_num_new_matched_tokens()</code></td>
+<td>查询远程 KV cache 中已存在的 token 数，减少重复计算</td>
+</tr>
+<tr>
+<td><code>update_state_after_alloc()</code></td>
+<td>KV 缓冲区分配后更新 connector 状态</td>
+</tr>
+<tr>
+<td><code>build_connector_meta()</code></td>
+<td>构建传递给 Worker 的 connector 元数据</td>
+</tr>
+<tr>
+<td><code>request_finished()</code></td>
+<td>请求完成时决定是否异步释放 blocks 或触发 KV 保存</td>
+</tr>
+</tbody>
+</table>
+<h3>Worker 侧</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_load_kv()</code></td>
+<td>开始异步加载所有层的 KV Cache</td>
+</tr>
+<tr>
+<td><code>wait_for_layer_load(i)</code></td>
+<td>阻塞直到第 i 层 KV 加载完成</td>
+</tr>
+<tr>
+<td><code>save_kv_layer(i)</code></td>
+<td>开始异步保存第 i 层 KV Cache</td>
+</tr>
+<tr>
+<td><code>wait_for_save()</code></td>
+<td>阻塞直到所有层保存完成</td>
+</tr>
+<tr>
+<td><code>get_finished()</code></td>
+<td>返回已完成 KV 传输的请求列表</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>已注册的 Connector</h2>
+      
+<table>
+<thead>
+<tr>
+<th>Connector</th>
+<th>传输协议</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P2pNcclConnector</td>
+<td>NCCL P2P</td>
+<td>点对点传输，简单直接</td>
+</tr>
+<tr>
+<td>LMCacheConnectorV1</td>
+<td>LMCache</td>
+<td>外部 KV cache 服务</td>
+</tr>
+<tr>
+<td>NixlConnector</td>
+<td>NIXL</td>
+<td>NVIDIA 高性能传输库</td>
+</tr>
+<tr>
+<td>MultiConnector</td>
+<td>多 Connector 组合</td>
+<td>聚合多个 connector</td>
+</tr>
+<tr>
+<td>MoRIIOConnector</td>
+<td>MoRI I/O</td>
+<td>I/O based 传输</td>
+</tr>
+<tr>
+<td>MooncakeConnector</td>
+<td>Mooncake</td>
+<td>Mooncake 传输协议</td>
+</tr>
+<tr>
+<td>HF3FSKVConnector</td>
+<td>3FS</td>
+<td>HuggingFace 3FS 存储</td>
+</tr>
+<tr>
+<td>OffloadingConnector</td>
+<td>CPU Offload</td>
+<td>CPU 内存卸载</td>
+</tr>
+<tr>
+<td>FlexKVConnectorV1</td>
+<td>FlexKV</td>
+<td>FlexKV 分布式缓存</td>
+</tr>
+<tr>
+<td>SimpleCPUOffloadConnector</td>
+<td>CPU Offload</td>
+<td>简单 CPU 卸载实现</td>
+</tr>
+<tr>
+<td>ExampleConnector</td>
+<td>—</td>
+<td>示例实现，供开发者参考</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>P→D 传输流程</h2>
+      
+<div class="step-player" id="pd-transfer-flow"><div class="step-player-head"><h3 class="step-player-title" data-step-title>准备开始</h3><span class="step-player-progress" data-step-progress>0 / 5</span></div><p class="step-player-text" data-step-text>点击下一步，逐帧追踪流程。</p><div class="step-player-actions"><button type="button" data-step-prev disabled>上一步</button><button type="button" data-step-next>下一步</button><button type="button" data-step-reset>重置</button></div></div>
+<div class="step-list" id="pd-transfer-flow-steps"><div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-body"><h3>Prefill 节点：正常执行</h3>请求到达 Prefill 节点，<code>get_num_new_matched_tokens()</code> 返回 0（远程无缓存），正常执行 prefill 计算所有层的 KV Cache。
+<code class="step-ref">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code>
+</div></div>
+<div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-body"><h3>Prefill 节点：异步保存 KV</h3>请求完成后 <code>request_finished()</code> 返回 True，触发异步保存。逐层调用 <code>save_kv_layer(i)</code>，通过传输协议（NIXL/Mooncake 等）将 KV Cache 发送到 Decode 节点。调用 <code>wait_for_save()</code> 确保所有层保存完成。
+<code class="step-ref">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code>
+</div></div>
+<div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-body"><h3>Decode 节点：查询缓存命中</h3>请求到达 Decode 节点，<code>get_num_new_matched_tokens()</code> 返回远程已缓存的 token 数。若有缓存命中，只需计算未缓存部分的 token。
+<code class="step-ref">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code>
+</div></div>
+<div class="step-item" id="step-4"><div class="step-num">4</div><div class="step-body"><h3>Decode 节点：异步加载 KV</h3>调用 <code>start_load_kv()</code> 开始异步加载所有层的 KV Cache。<code>wait_for_layer_load(i)</code> 逐层等待加载完成。
+<code class="step-ref">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code>
+</div></div>
+<div class="step-item" id="step-5"><div class="step-num">5</div><div class="step-body"><h3>Decode 节点：正常 Decode</h3>KV Cache 加载完成后，Decode 节点正常执行 decode 循环，逐 token 生成输出。
+<code class="step-ref">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code>
+</div></div></div>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Worker 侧管线化</h2>
+      
+<p>KV 加载与 attention 计算可以管线化（pipeline），隐藏传输延迟：</p>
+<pre><code class="language-python">def execute_model(self, scheduler_output):
+    self.connector.start_load_kv(scheduler_output)
+    for layer_id in range(num_layers):
+        self.connector.wait_for_layer_load(layer_id)
+        hidden_states = self.model.layers[layer_id](hidden_states)
+</code></pre>
+<p><code>start_load_kv()</code> 在 forward pass 之前调用，启动所有层的异步加载。<code>wait_for_layer_load(i)</code> 在计算第 i 层 attention 之前阻塞等待，确保该层 KV 已就绪。这样第 i 层 attention 计算与第 i+1 层 KV 加载可以重叠执行：</p>
+<pre><code>时间轴：
+  [加载 Layer 0 KV] [加载 Layer 1 KV] [加载 Layer 2 KV] ...
+  ================== [计算 Layer 0 Attention] [计算 Layer 1 Attention] ...
+                     ↑ 等 L0 就绪           ↑ 等 L1 就绪
+</code></pre>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--kv-transfer-config</code></td>
+<td>None</td>
+<td>KV 传输配置 JSON，包含 connector 类型、角色（prefill/decode）等</td>
+</tr>
+<tr>
+<td><code>--kv-connector</code></td>
+<td>None</td>
+<td>KV Connector 名称（如 "P2pNcclConnector", "NixlConnector" 等）</td>
+</tr>
+<tr>
+<td><code>--kv-role</code></td>
+<td>None</td>
+<td>节点角色：prefill 或 decode</td>
+</tr>
+<tr>
+<td><code>--kv-rank</code></td>
+<td>0</td>
+<td>KV 传输的 rank ID</td>
+</tr>
+<tr>
+<td><code>--kv-parallel-size</code></td>
+<td>1</td>
+<td>KV 传输并行度</td>
+</tr>
+<tr>
+<td><code>--kv-buffer-device</code></td>
+<td>"cuda"</td>
+<td>KV 缓冲区设备（cuda / cpu）</td>
+</tr>
+<tr>
+<td><code>--kv-ip</code></td>
+<td>"127.0.0.1"</td>
+<td>对端节点的 IP 地址</td>
+</tr>
+<tr>
+<td><code>--kv-port</code></td>
+<td>14579</td>
+<td>对端节点的端口号</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象一家餐厅厨房：prefill 好比食材准备（切菜、腌制——计算密集型），decode 好比烹饪和摆盘（内存带宽密集型）。Disaggregated Prefill 把这两种工作分离到不同的厨房（GPU），把准备好的食材（KV cache）从备菜间传到烹饪间。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram">
+    <div class="comm-panorama">
+      <div class="comm-proc">
+        <div class="comm-proc-title">Prefill 节点</div>
+        <div class="comm-proc-body">
+          <div class="comm-node-sub">计算密集型</div>
+          <div class="comm-node">处理长 prompt</div>
+          <div class="comm-node">生成 KV Cache</div>
+          <div class="comm-node">异步传输 KV</div>
+        </div>
+      </div>
+      <div class="comm-channel-group">
+        <div class="comm-channel-item">
+          <div class="comm-arrow">KV Cache ▶</div>
+          <div class="comm-label">KV Connector (NIXL / Mooncake / ...)</div>
+        </div>
+      </div>
+      <div class="comm-proc">
+        <div class="comm-proc-title">Decode 节点</div>
+        <div class="comm-proc-body">
+          <div class="comm-node-sub">内存带宽密集型</div>
+          <div class="comm-node">加载 KV Cache</div>
+          <div class="comm-node">逐 token 生成</div>
+          <div class="comm-node">低延迟响应</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Disaggregated Prefill 将推理分为两种节点：</p>
+<p><strong>Prefill 节点</strong>：计算密集型，负责处理长 prompt 和生成 KV Cache。完成后通过 KV Connector 异步传输 KV Cache 到 Decode 节点。Prefill 节点可以使用大 GPU 集群并行处理多个长 prompt。</p>
+<p><strong>Decode 节点</strong>：内存带宽密集型，负责加载 KV Cache 后逐 token 生成输出。Decode 节点不受长 prefill 阻塞，可以持续保持低延迟响应。</p>
+<p>两种节点之间通过 KV Connector（支持 NIXL、Mooncake 等传输协议）异步传输 KV Cache。</p>
+<h2>为什么需要 P/D 分离</h2>
+<p>Prefill 是计算密集型（compute-bound），decode 是内存带宽密集型（memory-bandwidth-bound）。混合部署时：</p>
+<ol>
+<li><strong>长 prefill 阻塞 decode</strong>：一个长 prefill 请求占满计算资源，decode 请求排队等待，TTFT 和 TBT（Time Between Tokens）均增大</li>
+<li><strong>资源配置矛盾</strong>：prefill 需要高算力（更多 SM），decode 需要高带宽（更大显存带宽），同一 GPU 无法同时最优化</li>
+<li><strong>批处理干扰</strong>：prefill 和 decode 混合调度时，batch 组成变化导致 GPU 利用率波动</li>
+</ol>
+<p>分离后，prefill 节点专注高吞吐的 prompt 处理，decode 节点专注低延迟的 token 生成，各自独立扩缩容。</p>
+<h2>KVConnector 双侧接口</h2>
+<p><code>KVConnectorBase_V1</code> 定义了 Scheduler 侧和 Worker 侧的异步接口，两侧分别运行在不同的 EngineCore 进程中：</p>
+<h3>Scheduler 侧</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_num_new_matched_tokens()</code></td>
+<td>查询远程 KV cache 中已存在的 token 数，减少重复计算</td>
+</tr>
+<tr>
+<td><code>update_state_after_alloc()</code></td>
+<td>KV 缓冲区分配后更新 connector 状态</td>
+</tr>
+<tr>
+<td><code>build_connector_meta()</code></td>
+<td>构建传递给 Worker 的 connector 元数据</td>
+</tr>
+<tr>
+<td><code>request_finished()</code></td>
+<td>请求完成时决定是否异步释放 blocks 或触发 KV 保存</td>
+</tr>
+</tbody>
+</table>
+<h3>Worker 侧</h3>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_load_kv()</code></td>
+<td>开始异步加载所有层的 KV Cache</td>
+</tr>
+<tr>
+<td><code>wait_for_layer_load(i)</code></td>
+<td>阻塞直到第 i 层 KV 加载完成</td>
+</tr>
+<tr>
+<td><code>save_kv_layer(i)</code></td>
+<td>开始异步保存第 i 层 KV Cache</td>
+</tr>
+<tr>
+<td><code>wait_for_save()</code></td>
+<td>阻塞直到所有层保存完成</td>
+</tr>
+<tr>
+<td><code>get_finished()</code></td>
+<td>返回已完成 KV 传输的请求列表</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h2>已注册的 Connector</h2>
+<table>
+<thead>
+<tr>
+<th>Connector</th>
+<th>传输协议</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P2pNcclConnector</td>
+<td>NCCL P2P</td>
+<td>点对点传输，简单直接</td>
+</tr>
+<tr>
+<td>LMCacheConnectorV1</td>
+<td>LMCache</td>
+<td>外部 KV cache 服务</td>
+</tr>
+<tr>
+<td>NixlConnector</td>
+<td>NIXL</td>
+<td>NVIDIA 高性能传输库</td>
+</tr>
+<tr>
+<td>MultiConnector</td>
+<td>多 Connector 组合</td>
+<td>聚合多个 connector</td>
+</tr>
+<tr>
+<td>MoRIIOConnector</td>
+<td>MoRI I/O</td>
+<td>I/O based 传输</td>
+</tr>
+<tr>
+<td>MooncakeConnector</td>
+<td>Mooncake</td>
+<td>Mooncake 传输协议</td>
+</tr>
+<tr>
+<td>HF3FSKVConnector</td>
+<td>3FS</td>
+<td>HuggingFace 3FS 存储</td>
+</tr>
+<tr>
+<td>OffloadingConnector</td>
+<td>CPU Offload</td>
+<td>CPU 内存卸载</td>
+</tr>
+<tr>
+<td>FlexKVConnectorV1</td>
+<td>FlexKV</td>
+<td>FlexKV 分布式缓存</td>
+</tr>
+<tr>
+<td>SimpleCPUOffloadConnector</td>
+<td>CPU Offload</td>
+<td>简单 CPU 卸载实现</td>
+</tr>
+<tr>
+<td>ExampleConnector</td>
+<td>—</td>
+<td>示例实现，供开发者参考</td>
+</tr>
+</tbody>
+</table>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/</code></p>
+<h2>P→D 传输流程</h2>
+<h3>1. Prefill 节点：正常执行</h3>
+<p>请求到达 Prefill 节点，<code>get_num_new_matched_tokens()</code> 返回 0（远程无缓存），正常执行 prefill 计算所有层的 KV Cache。
+<code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h3>2. Prefill 节点：异步保存 KV</h3>
+<p>请求完成后 <code>request_finished()</code> 返回 True，触发异步保存。逐层调用 <code>save_kv_layer(i)</code>，通过传输协议（NIXL/Mooncake 等）将 KV Cache 发送到 Decode 节点。调用 <code>wait_for_save()</code> 确保所有层保存完成。
+<code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h3>3. Decode 节点：查询缓存命中</h3>
+<p>请求到达 Decode 节点，<code>get_num_new_matched_tokens()</code> 返回远程已缓存的 token 数。若有缓存命中，只需计算未缓存部分的 token。
+<code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h3>4. Decode 节点：异步加载 KV</h3>
+<p>调用 <code>start_load_kv()</code> 开始异步加载所有层的 KV Cache。<code>wait_for_layer_load(i)</code> 逐层等待加载完成。
+<code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h3>5. Decode 节点：正常 Decode</h3>
+<p>KV Cache 加载完成后，Decode 节点正常执行 decode 循环，逐 token 生成输出。
+<code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h2>Worker 侧管线化</h2>
+<p>KV 加载与 attention 计算可以管线化（pipeline），隐藏传输延迟：</p>
+<pre><code class="language-python">def execute_model(self, scheduler_output):
+    self.connector.start_load_kv(scheduler_output)
+    for layer_id in range(num_layers):
+        self.connector.wait_for_layer_load(layer_id)
+        hidden_states = self.model.layers[layer_id](hidden_states)
+</code></pre>
+<p><code>start_load_kv()</code> 在 forward pass 之前调用，启动所有层的异步加载。<code>wait_for_layer_load(i)</code> 在计算第 i 层 attention 之前阻塞等待，确保该层 KV 已就绪。这样第 i 层 attention 计算与第 i+1 层 KV 加载可以重叠执行：</p>
+<pre><code>时间轴：
+  [加载 Layer 0 KV] [加载 Layer 1 KV] [加载 Layer 2 KV] ...
+  ================== [计算 Layer 0 Attention] [计算 Layer 1 Attention] ...
+                     ↑ 等 L0 就绪           ↑ 等 L1 就绪
+</code></pre>
+<p><code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--kv-transfer-config</code></td>
+<td>None</td>
+<td>KV 传输配置 JSON，包含 connector 类型、角色（prefill/decode）等</td>
+</tr>
+<tr>
+<td><code>--kv-connector</code></td>
+<td>None</td>
+<td>KV Connector 名称（如 "P2pNcclConnector", "NixlConnector" 等）</td>
+</tr>
+<tr>
+<td><code>--kv-role</code></td>
+<td>None</td>
+<td>节点角色：prefill 或 decode</td>
+</tr>
+<tr>
+<td><code>--kv-rank</code></td>
+<td>0</td>
+<td>KV 传输的 rank ID</td>
+</tr>
+<tr>
+<td><code>--kv-parallel-size</code></td>
+<td>1</td>
+<td>KV 传输并行度</td>
+</tr>
+<tr>
+<td><code>--kv-buffer-device</code></td>
+<td>"cuda"</td>
+<td>KV 缓冲区设备（cuda / cpu）</td>
+</tr>
+<tr>
+<td><code>--kv-ip</code></td>
+<td>"127.0.0.1"</td>
+<td>对端节点的 IP 地址</td>
+</tr>
+<tr>
+<td><code>--kv-port</code></td>
+<td>14579</td>
+<td>对端节点的端口号</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
+  <script src="../../assets/js/animation-engine.js"></script>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

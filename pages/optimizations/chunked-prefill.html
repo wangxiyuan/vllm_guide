@@ -12,27 +12,399 @@
 <body data-page-id="chunked-prefill">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
-    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>optimization</span><span>/</span><span>Chunked Prefill</span></nav>
+    <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>optimizations</span><span>/</span><span>Chunked Prefill</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>optimization</span><span>intermediate</span><span class="status">todo</span><span>12 min</span></div>
+      <div class="card-meta"><span>optimizations</span><span>intermediate</span><span class="status">draft</span><span>12 min</span></div>
       <h1>Chunked Prefill</h1>
-      <p class="hero-text">长 prompt 拆分调度专题占位</p>
+      <p class="hero-text">长 <span data-term="prefill" data-tip="处理完整 prompt 的阶段，计算密集型。">prefill</span> 请求被拆分为多个 chunk 调度，避免单个长请求阻塞 <span data-term="decode" data-tip="逐 token 生成的阶段，访存密集型。">decode</span> 请求。</p>
       <div class="tags"><span class="tag">Chunked Prefill</span><span class="tag">Scheduler</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/chunked-prefill-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>想象一条高速公路，有<strong>普通车道</strong>和<strong>快速车道</strong>。长 prefill 请求就像慢速卡车——它们不应该堵住快速行驶的 decode 小汽车。Chunked prefill 把每辆卡车切成小段，让小汽车能在卡车段之间穿插通过。</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/sched/scheduler.py">
+    <div class="diagram-title">Chunked Prefill 心智模型</div>
+    <div class="sched-flow">
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">无 Chunked Prefill</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">长 Prefill (100K tokens)</div>
+          <div class="sched-step">Decode 1</div>
+          <div class="sched-step">Decode 2</div>
+          <div class="sched-step">Decode 3</div>
+        </div>
+        <div class="muted">Decode 请求被阻塞多步</div>
+      </div>
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">有 Chunked Prefill</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">Prefill Chunk 1</div>
+          <div class="sched-step">Decode 1</div>
+          <div class="sched-step">Prefill Chunk 2</div>
+          <div class="sched-step">Decode 2</div>
+          <div class="sched-step">Prefill Chunk 3</div>
+          <div class="sched-step">Decode 3</div>
+        </div>
+        <div class="muted">Decode 请求穿插执行</div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="cp-mental-model"><p>Chunked Prefill 心智模型对比了有无分块时的调度情况：</p>
+<p><strong>无 Chunked Prefill</strong>：一个长 prefill 请求（如 100K tokens）独占整个 token budget，连续执行多步。所有 decode 请求被阻塞，等待 prefill 完成后才能执行。这导致 decode 请求的延迟显著增加。</p>
+<p><strong>有 Chunked Prefill</strong>：长 prefill 被拆分为多个 chunk，每个 chunk 只使用部分 token budget。在 chunk 之间，decode 请求可以穿插执行。这保证了 decode 请求的连续性，降低了延迟。</p>
+<p>关键收益：decode 请求不被长 prefill 阻塞、降低 decode 延迟、提高系统响应性。</p>
+</template>
+<p>关键收益：<strong>decode 请求不被长 prefill 阻塞</strong>、<strong>降低 decode 延迟</strong>、<strong>提高系统响应性</strong>。</p>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>为什么需要 Chunked Prefill</h2>
+      
+<p>没有 chunked prefill 时，一个长 prompt（如 100K tokens）会独占整个 token budget，阻塞所有 decode 请求：</p>
+<ul>
+<li><strong>单步阻塞</strong>：假设 token budget = 256，一个 100K token 的 prefill 需要 ~400 步才能完成</li>
+<li><strong>decode 停滞</strong>：这 400 步内，所有 decode 请求都无法执行，延迟飙升</li>
+<li><strong>用户体验差</strong>：用户看到生成过程长时间停顿</li>
+</ul>
+<p>有了 chunked prefill，长 prompt 被拆成小 chunk，每个 chunk 只用部分 budget：</p>
+<ul>
+<li><strong>穿插执行</strong>：每步执行一个 prefill chunk + 多个 decode 请求</li>
+<li><strong>decode 连续</strong>：decode 请求几乎不受影响，保持流畅</li>
+<li><strong>公平调度</strong>：长 prefill 和 decode 请求都能获得资源</li>
+</ul>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>分块逻辑</h2>
+      
+<p>调度器在处理 RUNNING 请求时，会根据配置决定是否对长 prefill 进行分块：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+# RUNNING 请求的分块逻辑
+num_new_tokens = num_tokens_with_spec - num_computed_tokens
+
+if 0 < long_prefill_token_threshold < num_new_tokens:
+    num_new_tokens = long_prefill_token_threshold
+
+num_new_tokens = min(num_new_tokens, token_budget)
+</code></pre>
+<ul>
+<li><code>num_tokens_with_spec</code>：请求的总 token 数（含投机解码的 draft tokens）</li>
+<li><code>num_computed_tokens</code>：已计算的 token 数</li>
+<li><code>long_prefill_token_threshold</code>：长 prefill 的 chunk 大小阈值</li>
+<li><code>token_budget</code>：本步可用的 token 总预算</li>
+</ul>
+<p>如果 <code>num_new_tokens</code> 超过阈值，则限制为阈值大小，实现分块。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>部分 Prefill 追踪</h2>
+      
+<p>一个 prefill 请求被分块后，会在多个调度步骤中持续执行：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+is_prefill_chunk = num_computed_tokens < (num_tokens + num_output_placeholders)
+</code></pre>
+<ul>
+<li><code>num_computed_tokens</code>：已计算的 token 数</li>
+<li><code>num_tokens</code>：prompt 的总 token 数</li>
+<li><code>num_output_placeholders</code>：输出占位符（用于投机解码等场景）</li>
+</ul>
+<p>当 <code>is_prefill_chunk = True</code> 时，请求还在 prefill 阶段，需要继续计算。每步执行后，<code>num_computed_tokens</code> 会增加，直到等于 <code>num_tokens</code>，prefill 完成。</p>
+<p>部分 prefill 请求会留在 <code>RUNNING</code> 队列中，下次调度时继续从上次中断的地方执行。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>Mamba 块对齐</h2>
+      
+<p>对于包含 Mamba 层的混合模型，<code>num_new_tokens</code> 必须是 <code>block_size</code> 的倍数，以实现块对齐的 KV cache：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+def _mamba_block_aligned_split(num_new_tokens, block_size):
+    remainder = num_new_tokens % block_size
+    if remainder == 0:
+        return num_new_tokens
+    return num_new_tokens - remainder
+</code></pre>
+<p>这确保了 Mamba 层的 KV cache 写入是块对齐的，避免跨块边界的复杂处理。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>调度优先级</h2>
+      
+<p>Chunked prefill 的调度分为两个阶段：</p>
+<pre class="diagram-raw"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/sched/scheduler.py">
+    <div class="diagram-title">调度优先级</div>
+    <div class="sched-flow">
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">Phase 1 - 调度 RUNNING 请求</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">Decode 请求（优先）</div>
+          <div class="sched-step">部分 Prefill 请求（继续执行）</div>
+        </div>
+      </div>
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">Phase 2 - 调度 WAITING 请求</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">新 Prefill 请求（仅当无抢占时）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="cp-sched-priority"><p>调度优先级展示了 chunked prefill 的两阶段调度：</p>
+<p><strong>Phase 1 - 调度 RUNNING 请求</strong>：优先处理已经在运行的请求。Decode 请求优先级最高，确保生成过程流畅。部分 prefill 请求（之前被分块的）继续执行，直到完成。</p>
+<p><strong>Phase 2 - 调度 WAITING 请求</strong>：只有在没有抢占发生时，才会从 WAITING 队列中接纳新的 prefill 请求。这避免了新请求挤占正在运行的 decode 请求的资源。</p>
+<p>关键原则：running decode 请求的优先级 > 新 prefill 请求。</p>
+</template>
+<p>关键原则：<strong>running decode 请求的优先级 > 新 prefill 请求</strong>。这确保了 decode 请求不会被新到达的 prefill 请求阻塞。</p>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+<th>源码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_chunked_prefill</code></td>
+<td>True</td>
+<td>是否启用 chunked prefill</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>long_prefill_token_threshold</code></td>
+<td>0（自动）</td>
+<td>长 prefill 的 chunk 大小。0 表示自动 = 4% max_model_len</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>max_num_partial_prefills</code></td>
+<td>1</td>
+<td>最大同时执行的部分 prefill 请求数</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>max_long_partial_prefills</code></td>
+<td>1</td>
+<td>最大同时执行的长部分 prefill 请求数</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>scheduler_reserve_full_isl</code></td>
+<td>True</td>
+<td>是否为完整 ISL（inter-sequence latency）预留资源</td>
+<td>scheduler_config.py</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>想象一条高速公路，有<strong>普通车道</strong>和<strong>快速车道</strong>。长 prefill 请求就像慢速卡车——它们不应该堵住快速行驶的 decode 小汽车。Chunked prefill 把每辆卡车切成小段，让小汽车能在卡车段之间穿插通过。</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/sched/scheduler.py">
+    <div class="diagram-title">Chunked Prefill 心智模型</div>
+    <div class="sched-flow">
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">无 Chunked Prefill</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">长 Prefill (100K tokens)</div>
+          <div class="sched-step">Decode 1</div>
+          <div class="sched-step">Decode 2</div>
+          <div class="sched-step">Decode 3</div>
+        </div>
+        <div class="muted">Decode 请求被阻塞多步</div>
+      </div>
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">有 Chunked Prefill</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">Prefill Chunk 1</div>
+          <div class="sched-step">Decode 1</div>
+          <div class="sched-step">Prefill Chunk 2</div>
+          <div class="sched-step">Decode 2</div>
+          <div class="sched-step">Prefill Chunk 3</div>
+          <div class="sched-step">Decode 3</div>
+        </div>
+        <div class="muted">Decode 请求穿插执行</div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>Chunked Prefill 心智模型对比了有无分块时的调度情况：</p>
+<p><strong>无 Chunked Prefill</strong>：一个长 prefill 请求（如 100K tokens）独占整个 token budget，连续执行多步。所有 decode 请求被阻塞，等待 prefill 完成后才能执行。这导致 decode 请求的延迟显著增加。</p>
+<p><strong>有 Chunked Prefill</strong>：长 prefill 被拆分为多个 chunk，每个 chunk 只使用部分 token budget。在 chunk 之间，decode 请求可以穿插执行。这保证了 decode 请求的连续性，降低了延迟。</p>
+<p>关键收益：decode 请求不被长 prefill 阻塞、降低 decode 延迟、提高系统响应性。</p>
+<p>关键收益：<strong>decode 请求不被长 prefill 阻塞</strong>、<strong>降低 decode 延迟</strong>、<strong>提高系统响应性</strong>。</p>
+<h2>为什么需要 Chunked Prefill</h2>
+<p>没有 chunked prefill 时，一个长 prompt（如 100K tokens）会独占整个 token budget，阻塞所有 decode 请求：</p>
+<ul>
+<li><strong>单步阻塞</strong>：假设 token budget = 256，一个 100K token 的 prefill 需要 ~400 步才能完成</li>
+<li><strong>decode 停滞</strong>：这 400 步内，所有 decode 请求都无法执行，延迟飙升</li>
+<li><strong>用户体验差</strong>：用户看到生成过程长时间停顿</li>
+</ul>
+<p>有了 chunked prefill，长 prompt 被拆成小 chunk，每个 chunk 只用部分 budget：</p>
+<ul>
+<li><strong>穿插执行</strong>：每步执行一个 prefill chunk + 多个 decode 请求</li>
+<li><strong>decode 连续</strong>：decode 请求几乎不受影响，保持流畅</li>
+<li><strong>公平调度</strong>：长 prefill 和 decode 请求都能获得资源</li>
+</ul>
+<h2>分块逻辑</h2>
+<p>调度器在处理 RUNNING 请求时，会根据配置决定是否对长 prefill 进行分块：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+# RUNNING 请求的分块逻辑
+num_new_tokens = num_tokens_with_spec - num_computed_tokens
+
+if 0 < long_prefill_token_threshold < num_new_tokens:
+    num_new_tokens = long_prefill_token_threshold
+
+num_new_tokens = min(num_new_tokens, token_budget)
+</code></pre>
+<ul>
+<li><code>num_tokens_with_spec</code>：请求的总 token 数（含投机解码的 draft tokens）</li>
+<li><code>num_computed_tokens</code>：已计算的 token 数</li>
+<li><code>long_prefill_token_threshold</code>：长 prefill 的 chunk 大小阈值</li>
+<li><code>token_budget</code>：本步可用的 token 总预算</li>
+</ul>
+<p>如果 <code>num_new_tokens</code> 超过阈值，则限制为阈值大小，实现分块。</p>
+<h2>部分 Prefill 追踪</h2>
+<p>一个 prefill 请求被分块后，会在多个调度步骤中持续执行：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+is_prefill_chunk = num_computed_tokens < (num_tokens + num_output_placeholders)
+</code></pre>
+<ul>
+<li><code>num_computed_tokens</code>：已计算的 token 数</li>
+<li><code>num_tokens</code>：prompt 的总 token 数</li>
+<li><code>num_output_placeholders</code>：输出占位符（用于投机解码等场景）</li>
+</ul>
+<p>当 <code>is_prefill_chunk = True</code> 时，请求还在 prefill 阶段，需要继续计算。每步执行后，<code>num_computed_tokens</code> 会增加，直到等于 <code>num_tokens</code>，prefill 完成。</p>
+<p>部分 prefill 请求会留在 <code>RUNNING</code> 队列中，下次调度时继续从上次中断的地方执行。</p>
+<h2>Mamba 块对齐</h2>
+<p>对于包含 Mamba 层的混合模型，<code>num_new_tokens</code> 必须是 <code>block_size</code> 的倍数，以实现块对齐的 KV cache：</p>
+<pre><code class="language-python"># vllm/v1/core/sched/scheduler.py
+def _mamba_block_aligned_split(num_new_tokens, block_size):
+    remainder = num_new_tokens % block_size
+    if remainder == 0:
+        return num_new_tokens
+    return num_new_tokens - remainder
+</code></pre>
+<p>这确保了 Mamba 层的 KV cache 写入是块对齐的，避免跨块边界的复杂处理。</p>
+<h2>调度优先级</h2>
+<p>Chunked prefill 的调度分为两个阶段：</p>
+<pre><code class="language-html"><div class="diagram-container">
+  <div class="diagram" data-ref="vllm/v1/core/sched/scheduler.py">
+    <div class="diagram-title">调度优先级</div>
+    <div class="sched-flow">
+      <div class="sched-phase" data-phase="running">
+        <div class="sched-phase-title">Phase 1 - 调度 RUNNING 请求</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">Decode 请求（优先）</div>
+          <div class="sched-step">部分 Prefill 请求（继续执行）</div>
+        </div>
+      </div>
+      <div class="sched-phase" data-phase="waiting">
+        <div class="sched-phase-title">Phase 2 - 调度 WAITING 请求</div>
+        <div class="sched-phase-steps">
+          <div class="sched-step">新 Prefill 请求（仅当无抢占时）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>调度优先级展示了 chunked prefill 的两阶段调度：</p>
+<p><strong>Phase 1 - 调度 RUNNING 请求</strong>：优先处理已经在运行的请求。Decode 请求优先级最高，确保生成过程流畅。部分 prefill 请求（之前被分块的）继续执行，直到完成。</p>
+<p><strong>Phase 2 - 调度 WAITING 请求</strong>：只有在没有抢占发生时，才会从 WAITING 队列中接纳新的 prefill 请求。这避免了新请求挤占正在运行的 decode 请求的资源。</p>
+<p>关键原则：running decode 请求的优先级 > 新 prefill 请求。</p>
+<p>关键原则：<strong>running decode 请求的优先级 > 新 prefill 请求</strong>。这确保了 decode 请求不会被新到达的 prefill 请求阻塞。</p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值</th>
+<th>说明</th>
+<th>源码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enable_chunked_prefill</code></td>
+<td>True</td>
+<td>是否启用 chunked prefill</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>long_prefill_token_threshold</code></td>
+<td>0（自动）</td>
+<td>长 prefill 的 chunk 大小。0 表示自动 = 4% max_model_len</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>max_num_partial_prefills</code></td>
+<td>1</td>
+<td>最大同时执行的部分 prefill 请求数</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>max_long_partial_prefills</code></td>
+<td>1</td>
+<td>最大同时执行的长部分 prefill 请求数</td>
+<td>scheduler_config.py</td>
+</tr>
+<tr>
+<td><code>scheduler_reserve_full_isl</code></td>
+<td>True</td>
+<td>是否为完整 ISL（inter-sequence latency）预留资源</td>
+<td>scheduler_config.py</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>

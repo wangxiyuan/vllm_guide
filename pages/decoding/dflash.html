@@ -12,27 +12,406 @@
 <body data-page-id="dflash">
   <header class="site-header">
     <a class="brand" href="../../index.html">vLLM Visual Guide</a>
+    <button type="button" class="md-toggle" id="md-toggle" title="切换 Markdown 原文">MD</button>
   </header>
   <main class="topic-page">
     <nav class="breadcrumb"><a href="../../index.html">首页</a><span>/</span><span>decoding</span><span>/</span><span>DFlash</span></nav>
 
+    <div class="topic-content" id="topic-content">
     <section class="topic-hero panel">
-      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">todo</span><span>10 min</span></div>
+      <div class="card-meta"><span>decoding</span><span>advanced</span><span class="status">draft</span><span>10 min</span></div>
       <h1>DFlash</h1>
-      <p class="hero-text">In-fill 风格解码的投机方案</p>
+      <p class="hero-text">并行起草：使用 <span data-term="非因果注意力" data-tip="query 从 query embedding 来，K/V 从 target hidden states 来，允许 draft token 同时关注所有位置。">非因果注意力</span> 一次性生成所有候选 token，无需自回归循环。</p>
       <div class="tags"><span class="tag">DFlash</span><span class="tag">Speculative Decoding</span><span class="tag">In-Fill</span></div>
     </section>
 
-    <section class="panel">
-      <h2>心智模型</h2>
-      <div class="placeholder">放一张概念图或简化流程图，帮助读者建立心智模型。</div>
-    </section>
+
 
     <section class="panel">
-      <h2>交互演示</h2>
-      <div class="placeholder">在这里接入流程图、step player 或拓扑动画。<br>数据建议存放在 assets/data/dflash-steps.json。</div>
+      <h2>心智模型</h2>
+      
+<p>传统的自回归起草像逐词写文档——写完第一个词才能写第二个。DFlash 则像填空题：所有空位同时填写。context（target hidden states）提供参考信息（K/V），mask token 位置被替换为 draft 预测，一次 pass 完成。</p>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Context K/V（来自 Target Hidden States）</div>
+      <div class="arch-row">
+        <span class="arch-module">K₁</span>
+        <span class="arch-module">K₂</span>
+        <span class="arch-module">K₃</span>
+        <span class="muted">...</span>
+      </div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↓</div>
+    <div class="arch-label">非因果注意力</div>
+  </div>
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Query Embeddings（mask token 位置）</div>
+      <div class="arch-row">
+        <span class="arch-highlight">[M]₁</span>
+        <span class="arch-highlight">[M]₂</span>
+        <span class="arch-highlight">[M]₃</span>
+        <span class="arch-highlight">[M]₄</span>
+      </div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↓</div>
+    <div class="arch-label">并行预测</div>
+  </div>
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Draft Tokens</div>
+      <div class="arch-row">
+        <span class="arch-module">A</span>
+        <span class="arch-module">B</span>
+        <span class="arch-module">C</span>
+        <span class="arch-module">D</span>
+      </div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="dflash-mental-model-html"><p>DFlash 的心智模型：Context 的 K/V 来自 target hidden states（已有序列的语义信息），Query 来自 mask token 位置的 embedding。通过非因果注意力机制，所有 mask token 同时关注 context 的所有位置，一次性并行预测所有 draft token（A B C D）。无需自回归循环。</p>
+</template>
+
     </section>
+
+
+
+    <section class="panel">
+      <h2>DFlash 核心思路</h2>
+      
+<p>DFlash 采用<strong>并行起草</strong>策略，核心标志是 <code>parallel_drafting = True</code>。</p>
+<h3>非因果注意力</h3>
+<p>DFlash 使用非因果（non-causal）注意力机制：</p>
+<ul>
+<li><strong>K/V 来源</strong>：target model 的 hidden states（context）</li>
+<li><strong>Q 来源</strong>：query embeddings（mask token 位置）</li>
+<li>每个查询位置可以同时关注 context 的所有位置，不受因果掩码限制</li>
+</ul>
+<h3>预计算 Context KV</h3>
+<p>在 draft forward 之前，<code>precompute_and_store_context_kv()</code> 将 target model 的 hidden states 预计算为 K/V 并插入到 draft 模型的 KV cache 中。这样 draft forward 时只需计算 query 部分，无需重新处理 context。</p>
+<p><code>vllm/v1/spec_decode/dflash.py</code></p>
+<pre><code class="language-python">class DFlashProposer(SpecDecodeBaseProposer):
+    parallel_drafting = True
+
+    def precompute_and_store_context_kv(self, target_hidden_states):
+        context_kv = self.model.compute_kv(target_hidden_states)
+        self.model.insert_context_kv(context_kv)
+</code></pre>
+<h3>Mask Token</h3>
+<p>并行起草位置使用 <code>mask_token</code>（来自 <code>dflash_config</code>）作为占位符。这些位置被 DFlash 模型的 query embedding 替换，通过非因果注意力一次性预测所有 draft token。</p>
+<p><code>vllm/v1/spec_decode/dflash.py</code></p>
+<pre><code class="language-python">mask_token_id = self.dflash_config.mask_token_id
+draft_input_ids = torch.full(
+    (batch_size, num_spec_tokens), mask_token_id
+)
+</code></pre>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>与 EAGLE 的区别</h2>
+      
+<p>DFlash 和 EAGLE 是两种截然不同的起草策略：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>EAGLE</th>
+<th>DFlash</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>起草方式</td>
+<td>自回归（顺序）</td>
+<td>并行（一次 pass）</td>
+</tr>
+<tr>
+<td>注意力类型</td>
+<td>因果注意力</td>
+<td>非因果注意力</td>
+</tr>
+<tr>
+<td>Draft 生成延迟</td>
+<td>k 次 forward</td>
+<td>1 次 forward</td>
+</tr>
+<tr>
+<td>接受率</td>
+<td>较高（token 间有依赖）</td>
+<td>较低（token 间无依赖）</td>
+</tr>
+<tr>
+<td>Context KV</td>
+<td>不预计算</td>
+<td>预计算并存储</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>接受率敏感</td>
+<td>延迟敏感</td>
+</tr>
+</tbody>
+</table>
+<h3>接受率 vs 延迟权衡</h3>
+<ul>
+<li>EAGLE 的自回归方式使得后续 token 基于前面 token 的预测，接受率更高</li>
+<li>DFlash 的并行方式所有 token 独立预测，接受率较低，但每步 proposal 的延迟更低</li>
+<li>如果 <code>k * draft_forward_time >> target_forward_time</code>，DFlash 更优；反之 EAGLE 更优</li>
+</ul>
+<pre class="diagram-raw"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-proc">
+      <div class="arch-proc-title">EAGLE（自回归）</div>
+      <div class="arch-proc-sub">
+        <div class="arch-box arch-module">Forward → A</div>
+        <div class="arch-box arch-module">Forward → A B</div>
+        <div class="arch-box arch-module">Forward → A B C</div>
+        <div class="arch-box arch-module">Forward → A B C D</div>
+      </div>
+      <div class="muted">4 次 forward · 高接受率</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">DFlash（并行）</div>
+      <div class="arch-proc-sub">
+        <div class="engine-step">
+          <div class="engine-step-content">1 次 Forward → A B C D</div>
+        </div>
+      </div>
+      <div class="muted">1 次 forward · 低延迟</div>
+    </div>
+  </div>
+</div></pre>
+<template class="diagram-desc" data-diagram-desc="dflash-vs-eagle-html"><p>EAGLE 与 DFlash 对比：EAGLE 需要多次 forward 逐步生成 draft token（Forward → A, Forward → A B, ...），接受率高但延迟大。DFlash 只需一次 forward 并行生成所有 draft token（A B C D），延迟低但接受率较低。两种方法的核心权衡是接受率与 proposal 延迟。</p>
+</template>
+
+    </section>
+
+
+
+    <section class="panel">
+      <h2>关键配置</h2>
+      
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>dflash</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>DFlash 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+</tbody>
+</table>
+
+    </section>
+
+
+    </div>
+
+    <div class="topic-md-view" id="topic-md-view" hidden>
+      <div class="md-rendered-content"><h2>心智模型</h2>
+<p>传统的自回归起草像逐词写文档——写完第一个词才能写第二个。DFlash 则像填空题：所有空位同时填写。context（target hidden states）提供参考信息（K/V），mask token 位置被替换为 draft 预测，一次 pass 完成。</p>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Context K/V（来自 Target Hidden States）</div>
+      <div class="arch-row">
+        <span class="arch-module">K₁</span>
+        <span class="arch-module">K₂</span>
+        <span class="arch-module">K₃</span>
+        <span class="muted">...</span>
+      </div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↓</div>
+    <div class="arch-label">非因果注意力</div>
+  </div>
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Query Embeddings（mask token 位置）</div>
+      <div class="arch-row">
+        <span class="arch-highlight">[M]₁</span>
+        <span class="arch-highlight">[M]₂</span>
+        <span class="arch-highlight">[M]₃</span>
+        <span class="arch-highlight">[M]₄</span>
+      </div>
+    </div>
+  </div>
+  <div class="arch-channel">
+    <div class="arch-arrow">↓</div>
+    <div class="arch-label">并行预测</div>
+  </div>
+  <div class="arch-row">
+    <div class="arch-box">
+      <div class="arch-proc-title">Draft Tokens</div>
+      <div class="arch-row">
+        <span class="arch-module">A</span>
+        <span class="arch-module">B</span>
+        <span class="arch-module">C</span>
+        <span class="arch-module">D</span>
+      </div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>DFlash 的心智模型：Context 的 K/V 来自 target hidden states（已有序列的语义信息），Query 来自 mask token 位置的 embedding。通过非因果注意力机制，所有 mask token 同时关注 context 的所有位置，一次性并行预测所有 draft token（A B C D）。无需自回归循环。</p>
+<h2>DFlash 核心思路</h2>
+<p>DFlash 采用<strong>并行起草</strong>策略，核心标志是 <code>parallel_drafting = True</code>。</p>
+<h3>非因果注意力</h3>
+<p>DFlash 使用非因果（non-causal）注意力机制：</p>
+<ul>
+<li><strong>K/V 来源</strong>：target model 的 hidden states（context）</li>
+<li><strong>Q 来源</strong>：query embeddings（mask token 位置）</li>
+<li>每个查询位置可以同时关注 context 的所有位置，不受因果掩码限制</li>
+</ul>
+<h3>预计算 Context KV</h3>
+<p>在 draft forward 之前，<code>precompute_and_store_context_kv()</code> 将 target model 的 hidden states 预计算为 K/V 并插入到 draft 模型的 KV cache 中。这样 draft forward 时只需计算 query 部分，无需重新处理 context。</p>
+<p><code>vllm/v1/spec_decode/dflash.py</code></p>
+<pre><code class="language-python">class DFlashProposer(SpecDecodeBaseProposer):
+    parallel_drafting = True
+
+    def precompute_and_store_context_kv(self, target_hidden_states):
+        context_kv = self.model.compute_kv(target_hidden_states)
+        self.model.insert_context_kv(context_kv)
+</code></pre>
+<h3>Mask Token</h3>
+<p>并行起草位置使用 <code>mask_token</code>（来自 <code>dflash_config</code>）作为占位符。这些位置被 DFlash 模型的 query embedding 替换，通过非因果注意力一次性预测所有 draft token。</p>
+<p><code>vllm/v1/spec_decode/dflash.py</code></p>
+<pre><code class="language-python">mask_token_id = self.dflash_config.mask_token_id
+draft_input_ids = torch.full(
+    (batch_size, num_spec_tokens), mask_token_id
+)
+</code></pre>
+<h2>与 EAGLE 的区别</h2>
+<p>DFlash 和 EAGLE 是两种截然不同的起草策略：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>EAGLE</th>
+<th>DFlash</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>起草方式</td>
+<td>自回归（顺序）</td>
+<td>并行（一次 pass）</td>
+</tr>
+<tr>
+<td>注意力类型</td>
+<td>因果注意力</td>
+<td>非因果注意力</td>
+</tr>
+<tr>
+<td>Draft 生成延迟</td>
+<td>k 次 forward</td>
+<td>1 次 forward</td>
+</tr>
+<tr>
+<td>接受率</td>
+<td>较高（token 间有依赖）</td>
+<td>较低（token 间无依赖）</td>
+</tr>
+<tr>
+<td>Context KV</td>
+<td>不预计算</td>
+<td>预计算并存储</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>接受率敏感</td>
+<td>延迟敏感</td>
+</tr>
+</tbody>
+</table>
+<h3>接受率 vs 延迟权衡</h3>
+<ul>
+<li>EAGLE 的自回归方式使得后续 token 基于前面 token 的预测，接受率更高</li>
+<li>DFlash 的并行方式所有 token 独立预测，接受率较低，但每步 proposal 的延迟更低</li>
+<li>如果 <code>k * draft_forward_time >> target_forward_time</code>，DFlash 更优；反之 EAGLE 更优</li>
+</ul>
+<pre><code class="language-html"><div class="arch-diagram">
+  <div class="arch-row">
+    <div class="arch-proc">
+      <div class="arch-proc-title">EAGLE（自回归）</div>
+      <div class="arch-proc-sub">
+        <div class="arch-box arch-module">Forward → A</div>
+        <div class="arch-box arch-module">Forward → A B</div>
+        <div class="arch-box arch-module">Forward → A B C</div>
+        <div class="arch-box arch-module">Forward → A B C D</div>
+      </div>
+      <div class="muted">4 次 forward · 高接受率</div>
+    </div>
+    <div class="arch-proc">
+      <div class="arch-proc-title">DFlash（并行）</div>
+      <div class="arch-proc-sub">
+        <div class="engine-step">
+          <div class="engine-step-content">1 次 Forward → A B C D</div>
+        </div>
+      </div>
+      <div class="muted">1 次 forward · 低延迟</div>
+    </div>
+  </div>
+</div>
+</code></pre>
+<p>EAGLE 与 DFlash 对比：EAGLE 需要多次 forward 逐步生成 draft token（Forward → A, Forward → A B, ...），接受率高但延迟大。DFlash 只需一次 forward 并行生成所有 draft token（A B C D），延迟低但接受率较低。两种方法的核心权衡是接受率与 proposal 延迟。</p>
+<h2>关键配置</h2>
+<table>
+<thead>
+<tr>
+<th>配置项</th>
+<th>默认值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--speculative-method</code></td>
+<td>None</td>
+<td>设为 <code>dflash</code></td>
+</tr>
+<tr>
+<td><code>--speculative-model</code></td>
+<td>None</td>
+<td>DFlash 模型路径</td>
+</tr>
+<tr>
+<td><code>--num-speculative-tokens</code></td>
+<td>None</td>
+<td>Draft token 数量</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div>
+
   </main>
+
   <script src="../../assets/js/app.js"></script>
 </body>
 </html>
