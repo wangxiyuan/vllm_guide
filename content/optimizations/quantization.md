@@ -254,5 +254,5 @@ def register_quantization_config(name: str, config_cls: type):
 |------|--------|------|------|
 | `--quantization` | None | 量化方法名称（如 fp8, awq, gptq） | quantization_config.py |
 | `--kv-cache-dtype` | auto | KV cache 数据类型（auto/fp8_e4m3/fp8_e5m2） | cache_config.py |
-| `--gpu-memory-utilization` | 0.9 | GPU 显存利用率 | cache_config.py |
+| `--gpu-memory-utilization` | 0.92 | GPU 显存利用率 | cache_config.py |
 | `--quantization-param-path` | None | 外部量化参数文件路径 | quantization_config.py |

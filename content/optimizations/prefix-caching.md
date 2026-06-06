@@ -206,9 +206,9 @@ def init_none_hash() -> int:
 当请求的所有 token 都命中缓存时（`num_computed_tokens == num_tokens`），vLLM 会强制重算最后一个 token：
 
 ```python
-# vllm/v1/core/kv_cache_manager.py
-if num_computed_tokens == num_tokens:
-    num_computed_tokens = num_tokens - 1
+# vllm/v1/core/sched/scheduler.py
+if request.num_computed_tokens == request.num_tokens:
+    request.num_computed_tokens = request.num_tokens - 1
 ```
 
 这确保了最后一个 token 总是被**重新计算**，从而得到正确的 logits 用于采样。如果直接复用最后一个 token 的 KV，attention 输出可能不包含当前请求的完整上下文。

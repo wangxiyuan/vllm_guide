@@ -267,10 +267,11 @@ preempted_req = max(self.running, key=lambda r: (r.priority, r.arrival_time))
 
 ### 抢占时的回滚
 
-如果被抢占的请求在本步已经被调度过（在 `scheduled_running_reqs` 中），需要回滚其分配：
+如果被抢占的请求在本步已经被调度过（在 `scheduled_running_reqs` 中），需要回滚其分配。此回滚逻辑仅在 PRIORITY 模式下执行（因为 PRIORITY 模式下被抢占的请求可能是 running 列表中的任意请求，而非最后一个；FCFS 模式直接 `running.pop()` 取最后一个，通常不需要回滚）：
 
 ```python
 # vllm/v1/core/sched/scheduler.py
+# PRIORITY 模式下的回滚
 if preempted_req in scheduled_running_reqs:
     scheduled_running_reqs.remove(preempted_req)
     token_budget += num_scheduled_tokens.pop(preempted_req_id)  # 归还 token budget

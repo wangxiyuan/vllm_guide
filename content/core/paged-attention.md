@@ -679,4 +679,4 @@ def forward(self, query, key, value):
 | `kv_cache_dtype` | auto | KV cache 数据类型。fp8 可节省一半显存 | cache_config.py |
 | `--attention-backend` | 自动 | 手动指定 attention backend（通常不需要） | attention_config.py |
 | `VLLM_KV_CACHE_LAYOUT` | NHD | KV cache 物理排布。HND 对某些 kernel 更友好 | backends/utils.py |
-| `gpu_memory_utilization` | 0.9 | GPU 显存中用于 KV cache 的比例。决定 num_blocks | cache_config.py |
+| `gpu_memory_utilization` | 0.92 | GPU 显存中用于 KV cache 的比例。决定 num_blocks | cache_config.py |

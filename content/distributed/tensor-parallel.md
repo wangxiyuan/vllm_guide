@@ -91,7 +91,7 @@ vLLM 提供四种 TP 线性层，对应不同的切分策略：
 | ColumnParallelLinear | output 维度 | gather_output=True 时 all-gather | QKV 投影、up_proj |
 | RowParallelLinear | input 维度 | all-reduce | o_proj、down_proj |
 | MergedColumnParallelLinear | output 维度 | gather_output=True 时 all-gather | gate_up_proj（合并 gate 和 up） |
-| QKVParallelLinear | output 维度 | gather_output=True 时 all-gather | QKV 投影（处理 GQA） |
+| QKVParallelLinear | output 维度 | 无（默认 gather_output=False） | QKV 投影（处理 GQA） |
 
 :::diagram linear-layers
 ```html
@@ -141,7 +141,7 @@ vLLM 提供四种 TP 线性层，对应不同的切分策略：
 
 **MergedColumnParallelLinear**：将两个 Column Parallel 层合并（如 gate_proj 和 up_proj）。权重拼接后按 output 维度切分。`gather_output=True` 时 all-gather。
 
-**QKVParallelLinear**：专门处理 QKV 投影，支持 GQA 的 KV head 复制。权重按 output 维度切分，自动处理 head 复制逻辑。`gather_output=True` 时 all-gather。
+**QKVParallelLinear**：专门处理 QKV 投影，支持 GQA 的 KV head 复制。权重按 output 维度切分，自动处理 head 复制逻辑。默认 `gather_output=False`，无通信。
 :::
 
 ## 典型 Transformer 层的 TP 通信
